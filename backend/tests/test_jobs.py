@@ -640,6 +640,37 @@ def test_job_progress_never_decreases_during_ffmpeg_fallback(tmp_path):
     assert updated.stage == "audio-remux-retry"
 
 
+def test_active_job_progress_is_capped_below_validated_completion(tmp_path):
+    """Runner progress must not expose 100 before final validation completes."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    input_path = store.inputs / "active.mp4"
+    input_path.write_bytes(b"input")
+    job = store.create(
+        job_id="active-progress",
+        original_filename="active.mp4",
+        input_path=input_path,
+        output_path=store.results / "active-progress.mp4",
+        log_path=store.logs / "active-progress.log",
+        preset="3b-safe",
+        color_correction="lab",
+        media=MediaInfo(duration_seconds=1, width=320, height=180),
+    )
+    assert store.claim_next_queued() is not None
+
+    store.update_progress(job.id, 100, "adapter-complete")
+
+    active = store.get(job.id)
+    assert active is not None
+    assert active.status == "running"
+    assert active.progress == 99
+    store.complete(job.id)
+    completed = store.get(job.id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.progress == 100
+
+
 def test_restart_marks_interrupted_job_failed_and_resumes_queued_work(tmp_path):
     """Leaving a stale running job blocking queued work after restart must make this test fail."""
     store = JobStore(tmp_path)
