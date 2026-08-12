@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.domain import MediaInfo, target_dimensions
+from app.eta import EtaEstimate, workload_bucket
 from app.job_service import JobService
 from app.job_store import JobStore
 from app.main import create_app
@@ -916,6 +917,8 @@ def _phase_report(
     invocation: str = "full",
     elapsed_seconds: float = 5.0,
     phase: str = "encoding",
+    chunk_index: int = 1,
+    chunk_count: int = 4,
 ) -> ProgressReport:
     event = ProgressEvent(
         sequence=sequence,
@@ -925,8 +928,8 @@ def _phase_report(
         phase=phase,
         current_unit=current_unit,
         total_units=total_units,
-        chunk_index=1,
-        chunk_count=4,
+        chunk_index=chunk_index,
+        chunk_count=chunk_count,
         completed_unique_frames=0,
         chunk_unique_frames=25,
         chunk_context_frames=4,
@@ -1464,3 +1467,263 @@ def test_timing_public_job_separates_heartbeat_and_work_staleness(tmp_path):
     assert payload["eta_low_seconds"] is None
     assert payload["eta_high_seconds"] is None
     assert payload["eta_confidence"] == "none"
+
+
+def test_eta_samples_include_only_valid_comparable_history_and_earlier_chunks(
+    tmp_path,
+):
+    """Wrong-profile, wrong-workload, invalid, and active metrics must not calibrate ETA."""
+    fingerprint = (
+        "seedvr2:3b-safe:apple-mps:scale=1:batch=5:chunk=25:overlap=4:"
+        "dit_cache=disabled:vae_cache=disabled"
+    )
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "eta-samples", fingerprint=fingerprint)
+    assert store.claim_next_queued() is not None
+    now = datetime.now(UTC)
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=1,
+            work_sequence=1,
+            current_unit=10,
+            elapsed_seconds=100,
+            chunk_index=1,
+        ),
+        now=now,
+    )
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=2,
+            work_sequence=2,
+            current_unit=5,
+            elapsed_seconds=50,
+            chunk_index=2,
+        ),
+        now=now + timedelta(seconds=1),
+    )
+    active_bucket = workload_bucket(640 * 360 * 25)
+    with sqlite3.connect(store.database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO performance_samples (
+                sample_group, phase, seconds_per_unit, workload_bucket,
+                runtime_profile_fingerprint, sample_date
+            ) VALUES (?, ?, ?, ?, ?, '2026-08-12')
+            """,
+            [
+                ("matching", "encoding", 10.0, active_bucket, fingerprint),
+                ("near-bucket", "encoding", 11.0, active_bucket + 1, fingerprint),
+                ("wrong-profile", "encoding", 1.0, active_bucket, fingerprint + ":other"),
+                ("far-bucket", "encoding", 1.0, active_bucket + 2, fingerprint),
+                ("nonfinite", "encoding", float("inf"), active_bucket, fingerprint),
+                ("nonnumeric", "encoding", "not-a-rate", active_bucket, fingerprint),
+            ],
+        )
+
+    samples = store.eta_samples(job.id)
+
+    assert {sample.sample_group for sample in samples} == {
+        "current-run",
+        "matching",
+        "near-bucket",
+    }
+    current = [sample for sample in samples if sample.sample_group == "current-run"]
+    assert len(current) == 1
+    assert current[0].elapsed_seconds == 100
+    assert current[0].completed_units == 10
+    assert all(sample.valid for sample in samples)
+
+
+def test_update_eta_clears_calibrating_bounds_without_losing_measured_progress(
+    tmp_path,
+):
+    """A calibrating estimate must clear stale bounds but preserve measured counters."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "eta-update")
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=2, elapsed_seconds=20),
+    )
+    store.update_eta(job.id, EtaEstimate(100, 200, "low", "historical"))
+    store.update_eta(job.id, EtaEstimate(None, None, "none", "none"))
+
+    updated = store.get(job.id)
+    assert updated is not None
+    assert updated.eta_low_seconds is None
+    assert updated.eta_high_seconds is None
+    assert updated.eta_confidence == "none"
+    assert updated.progress_source == "measured"
+
+
+def test_service_clamps_eta_to_remaining_process_deadline(tmp_path, monkeypatch):
+    """Elapsed process time must reduce ETA ceiling instead of restarting deadline."""
+    monkeypatch.setenv("VIDEO_UPSCALE_MAX_PROCESS_SECONDS", "300")
+    settings = Settings.from_environment().with_data_root(tmp_path, None)
+    store = JobStore(tmp_path)
+    store.initialize()
+    service = JobService(settings, store, ValidProbe(), CompletedRunner())
+    job = _create_timing_test_job(store, "eta-deadline")
+    started_at = datetime.now(UTC) - timedelta(seconds=200)
+    monkeypatch.setattr(store, "_now", lambda: started_at.isoformat())
+    assert store.claim_next_queued() is not None
+    _seed_eta_history(
+        store,
+        fingerprint=job.runtime_profile_fingerprint,
+        sample_group_prefix="deadline",
+        seconds_multiplier=100,
+    )
+
+    assert service._record_progress(
+        job,
+        _phase_report(sequence=1, work_sequence=1, current_unit=5, elapsed_seconds=50),
+    )
+
+    updated = store.get(job.id)
+    assert updated is not None
+    assert updated.eta_low_seconds is not None
+    assert updated.eta_high_seconds is not None
+    assert 0 <= updated.eta_low_seconds <= updated.eta_high_seconds <= 100
+
+
+class EtaReportingRunner:
+    def __init__(self, *, refresh: bool = False):
+        self.reported = threading.Event()
+        self.refresh_requested = threading.Event()
+        self.refreshed = threading.Event()
+        self.release = threading.Event()
+        self.refresh = refresh
+
+    def preflight(self, job, limits, report_progress, is_cancelled):
+        raise AssertionError("unexpected preflight")
+
+    def run(self, job, report_progress, is_cancelled):
+        report_progress(
+            _phase_report(
+                sequence=1,
+                work_sequence=1,
+                current_unit=5,
+                elapsed_seconds=50,
+            )
+        )
+        self.reported.set()
+        if self.refresh:
+            self.refresh_requested.wait(1)
+            report_progress(
+                _phase_report(
+                    sequence=2,
+                    work_sequence=1,
+                    current_unit=5,
+                    elapsed_seconds=50,
+                )
+            )
+            self.refreshed.set()
+        self.release.wait(1)
+        Path(job.output_path).write_bytes(b"mp4-result")
+
+
+def _seed_eta_history(
+    store: JobStore,
+    *,
+    fingerprint: str,
+    sample_group_prefix: str,
+    seconds_multiplier: float = 1.0,
+):
+    bucket = workload_bucket(640 * 360 * 25)
+    phase_seconds = {
+        "encoding": 100,
+        "upscaling": 300,
+        "decoding": 500,
+        "postprocessing": 100,
+    }
+    with sqlite3.connect(store.database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO performance_samples (
+                sample_group, phase, seconds_per_unit, workload_bucket,
+                runtime_profile_fingerprint, sample_date
+            ) VALUES (?, ?, ?, ?, ?, '2026-08-12')
+            """,
+            [
+                (
+                    f"{sample_group_prefix}-{index}",
+                    phase,
+                    seconds * seconds_multiplier / 10,
+                    bucket,
+                    fingerprint,
+                )
+                for index in range(3)
+                for phase, seconds in phase_seconds.items()
+            ],
+        )
+
+
+def test_first_active_job_exposes_measured_progress_while_eta_calibrates(tmp_path):
+    """No history must never fabricate ETA bounds or hide real phase counters."""
+    runner = EtaReportingRunner()
+    client = make_client(tmp_path, runner=runner)
+    job_id = submit_video(client).json()["id"]
+    assert runner.reported.wait(1)
+
+    payload = client.get(f"/api/jobs/{job_id}").json()
+    runner.release.set()
+
+    assert payload["eta_low_seconds"] is None
+    assert payload["eta_high_seconds"] is None
+    assert payload["eta_confidence"] == "none"
+    assert payload["progress_source"] == "measured"
+
+
+def test_api_eta_learns_anonymous_history_without_job_rows_or_profile_noise(tmp_path):
+    """ETA refresh must use durable matching history, not deleted jobs or noisy profiles."""
+    fingerprint = (
+        "seedvr2:3b-safe:apple-mps:scale=1:batch=5:chunk=25:overlap=4:"
+        "dit_cache=disabled:vae_cache=disabled"
+    )
+    runner = EtaReportingRunner(refresh=True)
+    app = create_app(
+        data_root=tmp_path,
+        runner=runner,
+        media_probe=ValidProbe(),
+    )
+    client = make_client_headers_client(app)
+    store = app.state.job_service.store
+    source_job_ids = []
+    for index in range(3):
+        source = _create_timing_test_job(store, f"eta-source-{index}")
+        store.fail(source.id, "test source is already anonymized")
+        source_job_ids.append(source.id)
+    _seed_eta_history(
+        store,
+        fingerprint=fingerprint,
+        sample_group_prefix="anonymous-match",
+    )
+
+    job_id = submit_video(client).json()["id"]
+    assert runner.reported.wait(1)
+    before = client.get(f"/api/jobs/{job_id}").json()
+    assert before["eta_confidence"] == "medium"
+    assert isinstance(before["eta_low_seconds"], int)
+    assert isinstance(before["eta_high_seconds"], int)
+    assert before["eta_low_seconds"] <= before["eta_high_seconds"]
+
+    for source_job_id in source_job_ids:
+        assert store.delete(source_job_id)
+    _seed_eta_history(
+        store,
+        fingerprint=fingerprint.replace("3b-safe", "7b-fp8-experimental"),
+        sample_group_prefix="wrong-profile",
+        seconds_multiplier=100,
+    )
+    runner.refresh_requested.set()
+    assert runner.refreshed.wait(1)
+    after = client.get(f"/api/jobs/{job_id}").json()
+    runner.release.set()
+
+    assert after["eta_low_seconds"] == before["eta_low_seconds"]
+    assert after["eta_high_seconds"] == before["eta_high_seconds"]
+    assert after["eta_confidence"] == before["eta_confidence"] == "medium"

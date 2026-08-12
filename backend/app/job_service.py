@@ -20,8 +20,10 @@ from .domain import (
     PreflightLimits,
     target_dimensions,
 )
+from .eta import ActiveWork, estimate_eta, workload_bucket
 from .job_store import JobStore
 from .media import MediaProbe, normalize_media_info
+from .progress import ProgressReport
 from .runner import JobCancelled, VideoRunner
 
 ALLOWED_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".webm"})
@@ -259,7 +261,7 @@ class JobService:
                 return
 
     def _run_job(self, job: Job) -> None:
-        report_progress = lambda report: self.store.record_report(job.id, report)
+        report_progress = lambda report: self._record_progress(job, report)
         is_cancelled = lambda: self.store.cancellation_requested(job.id)
         try:
             if not self.has_disk_reserve():
@@ -304,6 +306,46 @@ class JobService:
             else:
                 self._remove_partial_artifacts(job)
                 self.store.fail(job.id, str(error))
+
+    def _record_progress(self, job: Job, report: ProgressReport) -> bool:
+        accepted = self.store.record_report(job.id, report)
+        if not accepted:
+            return False
+        event = report.event
+        if (
+            report.invocation != "full"
+            or event is None
+            or event.event_type != "phase_progress"
+            or event.phase is None
+            or event.current_unit is None
+            or event.total_units is None
+            or event.chunk_unique_frames is None
+            or event.elapsed_seconds is None
+        ):
+            return True
+        active = ActiveWork(
+            phase=event.phase,
+            current_unit=event.current_unit,
+            total_units=event.total_units,
+            runtime_profile_fingerprint=job.runtime_profile_fingerprint,
+            workload_bucket=workload_bucket(
+                job.target_width * job.target_height * event.chunk_unique_frames
+            ),
+            phase_elapsed_seconds=event.elapsed_seconds,
+        )
+        current_job = self.store.get(job.id)
+        remaining_deadline = self.settings.max_process_seconds
+        if current_job is not None and current_job.started_at is not None:
+            started_at = datetime.fromisoformat(current_job.started_at)
+            elapsed = max(0.0, (datetime.now(UTC) - started_at).total_seconds())
+            remaining_deadline = max(0, int(remaining_deadline - elapsed))
+        estimate = estimate_eta(
+            active,
+            self.store.eta_samples(job.id),
+            remaining_deadline,
+        )
+        self.store.update_eta(job.id, estimate)
+        return True
 
     def _validate_media(
         self,

@@ -7,11 +7,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .domain import Job, MediaInfo, PhaseSample
-from .progress import MAX_COUNTER, ProgressEvent, ProgressReport
+from .eta import EtaEstimate, workload_bucket
+from .progress import MAX_COUNTER, PHASES, ProgressEvent, ProgressReport
 
 
 HEARTBEAT_STALE_SECONDS = 120
 PROGRESS_STALE_SECONDS = 300
+
+
+def _positive_finite_number(value: object) -> float | None:
+    if type(value) not in {int, float}:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number > 0 else None
 
 
 class JobStore:
@@ -573,6 +581,133 @@ class JobStore:
             for row in rows
         ]
 
+    def eta_samples(self, job_id: str) -> list[PhaseSample]:
+        with self._connect() as connection:
+            job = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if (
+                job is None
+                or job["last_event_invocation"] != "full"
+                or job["phase_name"] not in PHASES
+                or job["chunk_current"] is None
+            ):
+                return []
+            active_metric = connection.execute(
+                """
+                SELECT output_pixel_frames FROM job_phase_metrics
+                WHERE job_id = ? AND invocation = 'full'
+                  AND chunk_index = ? AND phase = ?
+                """,
+                (job_id, job["chunk_current"], job["phase_name"]),
+            ).fetchone()
+            if (
+                active_metric is None
+                or type(active_metric["output_pixel_frames"]) is not int
+                or active_metric["output_pixel_frames"] <= 0
+            ):
+                return []
+            active_bucket = workload_bucket(active_metric["output_pixel_frames"])
+            current_rows = connection.execute(
+                """
+                SELECT * FROM job_phase_metrics
+                WHERE job_id = ? AND invocation = 'full' AND valid_sample = 1
+                  AND finished_at IS NOT NULL AND completed_units > 0
+                  AND elapsed_seconds > 0 AND chunk_index < ?
+                  AND runtime_profile_fingerprint = ?
+                ORDER BY chunk_index, phase
+                """,
+                (
+                    job_id,
+                    job["chunk_current"],
+                    job["runtime_profile_fingerprint"],
+                ),
+            ).fetchall()
+            historical_rows = connection.execute(
+                """
+                SELECT * FROM performance_samples
+                WHERE runtime_profile_fingerprint = ?
+                  AND workload_bucket BETWEEN ? AND ?
+                  AND seconds_per_unit > 0
+                ORDER BY id
+                """,
+                (
+                    job["runtime_profile_fingerprint"],
+                    active_bucket - 1,
+                    active_bucket + 1,
+                ),
+            ).fetchall()
+
+        samples: list[PhaseSample] = []
+        for row in current_rows:
+            elapsed_seconds = _positive_finite_number(row["elapsed_seconds"])
+            completed_units = row["completed_units"]
+            if (
+                elapsed_seconds is None
+                or type(completed_units) is not int
+                or completed_units <= 0
+                or type(row["output_pixel_frames"]) is not int
+                or row["output_pixel_frames"] <= 0
+            ):
+                continue
+            bucket = workload_bucket(row["output_pixel_frames"])
+            if (
+                row["phase"] not in PHASES
+                or abs(bucket - active_bucket) > 1
+            ):
+                continue
+            samples.append(
+                PhaseSample(
+                    sample_group="current-run",
+                    phase=row["phase"],
+                    elapsed_seconds=elapsed_seconds,
+                    completed_units=completed_units,
+                    runtime_profile_fingerprint=row[
+                        "runtime_profile_fingerprint"
+                    ],
+                    workload_bucket=bucket,
+                    valid=True,
+                )
+            )
+        for row in historical_rows:
+            seconds_per_unit = _positive_finite_number(row["seconds_per_unit"])
+            if (
+                seconds_per_unit is None
+                or row["phase"] not in PHASES
+                or type(row["workload_bucket"]) is not int
+            ):
+                continue
+            samples.append(
+                PhaseSample(
+                    sample_group=row["sample_group"],
+                    phase=row["phase"],
+                    elapsed_seconds=seconds_per_unit,
+                    completed_units=1,
+                    runtime_profile_fingerprint=row[
+                        "runtime_profile_fingerprint"
+                    ],
+                    workload_bucket=int(row["workload_bucket"]),
+                    valid=True,
+                )
+            )
+        return samples
+
+    def update_eta(self, job_id: str, estimate: EtaEstimate) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET eta_low_seconds = ?, eta_high_seconds = ?, eta_confidence = ?
+                WHERE id = ? AND status IN ('running', 'preflight')
+                """,
+                (
+                    estimate.low_seconds,
+                    estimate.high_seconds,
+                    estimate.confidence,
+                    job_id,
+                ),
+            )
+
     def recover_interrupted(self) -> list[Job]:
         """Make stale active work terminal so a restart cannot block queue progress."""
         with self._connect() as connection:
@@ -804,7 +939,7 @@ class JobStore:
 
     @staticmethod
     def _workload_bucket(pixel_frames: int) -> int:
-        return max(0, int(math.log2(max(1, pixel_frames))))
+        return workload_bucket(pixel_frames)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
