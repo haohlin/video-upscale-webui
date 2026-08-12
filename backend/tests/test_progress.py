@@ -57,6 +57,18 @@ def test_parse_progress_line_rejects_malformed_sensitive_or_unbounded_events(lin
     assert parse_progress_line(line) is None
 
 
+def test_parse_progress_line_rejects_integer_too_large_for_json_decoder():
+    line = event_line().replace('"sequence": 7', '"sequence": ' + "9" * 5_000)
+    assert len(line[6:]) <= MAX_PROGRESS_JSON_CHARS
+    assert parse_progress_line(line) is None
+
+
+def test_parse_progress_line_rejects_integer_elapsed_time_too_large_for_float():
+    line = event_line().replace('"elapsed_seconds": 12.5', '"elapsed_seconds": ' + "9" * 1_000)
+    assert len(line[6:]) <= MAX_PROGRESS_JSON_CHARS
+    assert parse_progress_line(line) is None
+
+
 @pytest.mark.parametrize(
     ("phase", "current", "expected"),
     [

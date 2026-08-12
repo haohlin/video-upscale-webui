@@ -123,7 +123,7 @@ def parse_progress_line(line: str) -> ProgressEvent | None:
         return None
     try:
         payload = json.loads(encoded)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         return None
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         return None
@@ -150,12 +150,10 @@ def parse_progress_line(line: str) -> ProgressEvent | None:
         if elapsed_value is not None:
             if type(elapsed_value) not in {int, float}:
                 raise ValueError
+            if type(elapsed_value) is int and not 0 <= elapsed_value <= MAX_COUNTER:
+                raise ValueError
             elapsed_seconds = float(elapsed_value)
-            if (
-                not math.isfinite(elapsed_seconds)
-                or elapsed_seconds < 0
-                or elapsed_seconds > MAX_COUNTER
-            ):
+            if not math.isfinite(elapsed_seconds) or not 0 <= elapsed_seconds <= MAX_COUNTER:
                 raise ValueError
 
         sequence = counters["sequence"]
@@ -245,7 +243,7 @@ def parse_progress_line(line: str) -> ProgressEvent | None:
             total_unique_frames=total_unique_frames,
             elapsed_seconds=elapsed_seconds,
         )
-    except (AssertionError, ValueError):
+    except (AssertionError, OverflowError, ValueError):
         return None
 
 
