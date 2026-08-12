@@ -1,0 +1,5 @@
+# Architecture
+
+The application has React/Vite browser client and FastAPI service. Startup builds Vite output; FastAPI serves it at `/` while its JSON/file API stays under `/api`. A generated HTTP Basic credential protects UI and job API; state-changing requests require an additional same-origin header. Service owns inputs, bounded single-job queue, capped SQLite history, media validation, and SeedVR2/FFmpeg process orchestration. A raw ASGI guard limits every upload body and admits one upload at a time before multipart parsing/spooling. It binds only to loopback; Tailscale Serve provides private HTTPS access.
+
+ComfyUI and SeedVR2 runtime assets remain outside Git. Runtime media layout is `inputs`, `staging`, and `results`; cleanup removes only terminal jobs older than 24 hours and always preserves queued, preflight, and running jobs. Backend also caps terminal history and logs. Production profile is canonical `3b-safe`; 7B FP8 is explicit experimental probe only. Real-ESRGAN is deferred and not public API/UI preset.

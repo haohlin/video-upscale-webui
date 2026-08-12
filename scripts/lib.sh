@@ -1,0 +1,161 @@
+#!/bin/zsh
+# Shared helpers. All mutating entrypoints must parse --dry-run / --apply.
+
+set -euo pipefail
+
+SCRIPT_DIR="${0:A:h}"
+PROJECT_ROOT_DEFAULT="${SCRIPT_DIR:h}"
+CONFIG_FILE="${VIDEO_UPSCALE_CONFIG_FILE:-${PROJECT_ROOT_DEFAULT}/deploy/runtime.env}"
+
+die() {
+  print -u2 -- "error: $*"
+  exit 1
+}
+
+note() {
+  print -- "$*"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+require_absolute_path() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" == /* ]] || die "$name must be an absolute path"
+  [[ "$value" != "/" ]] || die "$name must not be /"
+  [[ "$value" != *$'\n'* ]] || die "$name must not contain a newline"
+}
+
+load_runtime_config() {
+  [[ -f "$CONFIG_FILE" ]] || die "missing runtime config: $CONFIG_FILE (copy deploy/runtime.env.example to deploy/runtime.env)"
+  # This is administrator-owned, local configuration. It is never populated
+  # from uploaded media, HTTP input, or repository data.
+  source "$CONFIG_FILE"
+
+  : "${VIDEO_UPSCALE_PROJECT_ROOT:?runtime config missing VIDEO_UPSCALE_PROJECT_ROOT}"
+  : "${VIDEO_UPSCALE_RUNTIME_ROOT:?runtime config missing VIDEO_UPSCALE_RUNTIME_ROOT}"
+  : "${VIDEO_UPSCALE_DATA_ROOT:?runtime config missing VIDEO_UPSCALE_DATA_ROOT}"
+  : "${VIDEO_UPSCALE_COMFY_DIR:?runtime config missing VIDEO_UPSCALE_COMFY_DIR}"
+  : "${VIDEO_UPSCALE_SEEDVR2_DIR:?runtime config missing VIDEO_UPSCALE_SEEDVR2_DIR}"
+  : "${VIDEO_UPSCALE_SEEDVR2_CLI:?runtime config missing VIDEO_UPSCALE_SEEDVR2_CLI}"
+  : "${VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI:?runtime config missing VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI}"
+  : "${VIDEO_UPSCALE_SEEDVR2_MODEL_DIR:?runtime config missing VIDEO_UPSCALE_SEEDVR2_MODEL_DIR}"
+  : "${VIDEO_UPSCALE_PYTHON:?runtime config missing VIDEO_UPSCALE_PYTHON}"
+  : "${VIDEO_UPSCALE_BACKEND_PYTHON:?runtime config missing VIDEO_UPSCALE_BACKEND_PYTHON}"
+  : "${VIDEO_UPSCALE_BACKEND_MODULE:?runtime config missing VIDEO_UPSCALE_BACKEND_MODULE}"
+  : "${VIDEO_UPSCALE_APP_PORT:?runtime config missing VIDEO_UPSCALE_APP_PORT}"
+  : "${VIDEO_UPSCALE_COMFY_PORT:?runtime config missing VIDEO_UPSCALE_COMFY_PORT}"
+  : "${VIDEO_UPSCALE_TAILSCALE_HTTPS_PORT:?runtime config missing VIDEO_UPSCALE_TAILSCALE_HTTPS_PORT}"
+  : "${VIDEO_UPSCALE_DISK_RESERVE_GB:?runtime config missing VIDEO_UPSCALE_DISK_RESERVE_GB}"
+  : "${PYTORCH_MPS_HIGH_WATERMARK_RATIO:?runtime config missing PYTORCH_MPS_HIGH_WATERMARK_RATIO}"
+  : "${PYTORCH_MPS_LOW_WATERMARK_RATIO:?runtime config missing PYTORCH_MPS_LOW_WATERMARK_RATIO}"
+  : "${VIDEO_UPSCALE_DEFAULT_PROFILE:?runtime config missing VIDEO_UPSCALE_DEFAULT_PROFILE}"
+  : "${VIDEO_UPSCALE_SEEDVR2_3B_MODEL:?runtime config missing VIDEO_UPSCALE_SEEDVR2_3B_MODEL}"
+  : "${VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL:?runtime config missing VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL}"
+  : "${VIDEO_UPSCALE_FFMPEG:?runtime config missing VIDEO_UPSCALE_FFMPEG}"
+  : "${VIDEO_UPSCALE_FFPROBE:?runtime config missing VIDEO_UPSCALE_FFPROBE}"
+
+  VIDEO_UPSCALE_ACCESS_USERNAME="${VIDEO_UPSCALE_ACCESS_USERNAME:-video}"
+  VIDEO_UPSCALE_ACCESS_TOKEN_FILE="${VIDEO_UPSCALE_ACCESS_TOKEN_FILE:-${VIDEO_UPSCALE_DATA_ROOT}/access-token}"
+  VIDEO_UPSCALE_PYTHON_VERSION="${VIDEO_UPSCALE_PYTHON_VERSION:-3.13.11}"
+  VIDEO_UPSCALE_FFPROBE_TIMEOUT_SECONDS="${VIDEO_UPSCALE_FFPROBE_TIMEOUT_SECONDS:-30}"
+  VIDEO_UPSCALE_UPLOAD_IDLE_TIMEOUT_SECONDS="${VIDEO_UPSCALE_UPLOAD_IDLE_TIMEOUT_SECONDS:-30}"
+  VIDEO_UPSCALE_UPLOAD_TOTAL_TIMEOUT_SECONDS="${VIDEO_UPSCALE_UPLOAD_TOTAL_TIMEOUT_SECONDS:-21600}"
+  VIDEO_UPSCALE_MAX_DURATION_SECONDS="${VIDEO_UPSCALE_MAX_DURATION_SECONDS:-3600}"
+  VIDEO_UPSCALE_MAX_SOURCE_DIMENSION="${VIDEO_UPSCALE_MAX_SOURCE_DIMENSION:-3840}"
+  VIDEO_UPSCALE_MAX_SOURCE_PIXELS="${VIDEO_UPSCALE_MAX_SOURCE_PIXELS:-8294400}"
+  VIDEO_UPSCALE_MAX_SOURCE_FRAME_RATE="${VIDEO_UPSCALE_MAX_SOURCE_FRAME_RATE:-120}"
+  VIDEO_UPSCALE_MAX_SOURCE_FRAMES="${VIDEO_UPSCALE_MAX_SOURCE_FRAMES:-216000}"
+  VIDEO_UPSCALE_MAX_PENDING_JOBS="${VIDEO_UPSCALE_MAX_PENDING_JOBS:-3}"
+  VIDEO_UPSCALE_MAX_RETAINED_JOBS="${VIDEO_UPSCALE_MAX_RETAINED_JOBS:-100}"
+  VIDEO_UPSCALE_MAX_PROCESS_SECONDS="${VIDEO_UPSCALE_MAX_PROCESS_SECONDS:-86400}"
+  VIDEO_UPSCALE_MAX_JOB_LOG_BYTES="${VIDEO_UPSCALE_MAX_JOB_LOG_BYTES:-10485760}"
+  VIDEO_UPSCALE_MAX_JOB_ARTIFACT_BYTES="${VIDEO_UPSCALE_MAX_JOB_ARTIFACT_BYTES:-68719476736}"
+
+  require_absolute_path VIDEO_UPSCALE_PROJECT_ROOT "$VIDEO_UPSCALE_PROJECT_ROOT"
+  require_absolute_path VIDEO_UPSCALE_RUNTIME_ROOT "$VIDEO_UPSCALE_RUNTIME_ROOT"
+  require_absolute_path VIDEO_UPSCALE_DATA_ROOT "$VIDEO_UPSCALE_DATA_ROOT"
+  require_absolute_path VIDEO_UPSCALE_COMFY_DIR "$VIDEO_UPSCALE_COMFY_DIR"
+  require_absolute_path VIDEO_UPSCALE_SEEDVR2_DIR "$VIDEO_UPSCALE_SEEDVR2_DIR"
+  require_absolute_path VIDEO_UPSCALE_SEEDVR2_CLI "$VIDEO_UPSCALE_SEEDVR2_CLI"
+  require_absolute_path VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI "$VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI"
+  require_absolute_path VIDEO_UPSCALE_FFMPEG "$VIDEO_UPSCALE_FFMPEG"
+  require_absolute_path VIDEO_UPSCALE_FFPROBE "$VIDEO_UPSCALE_FFPROBE"
+  require_absolute_path VIDEO_UPSCALE_SEEDVR2_MODEL_DIR "$VIDEO_UPSCALE_SEEDVR2_MODEL_DIR"
+  require_absolute_path VIDEO_UPSCALE_PYTHON "$VIDEO_UPSCALE_PYTHON"
+  require_absolute_path VIDEO_UPSCALE_BACKEND_PYTHON "$VIDEO_UPSCALE_BACKEND_PYTHON"
+  require_absolute_path VIDEO_UPSCALE_ACCESS_TOKEN_FILE "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE"
+  [[ "$VIDEO_UPSCALE_APP_PORT" == <-> ]] || die "VIDEO_UPSCALE_APP_PORT must be numeric"
+  [[ "$VIDEO_UPSCALE_COMFY_PORT" == <-> ]] || die "VIDEO_UPSCALE_COMFY_PORT must be numeric"
+  [[ "$VIDEO_UPSCALE_TAILSCALE_HTTPS_PORT" == <-> ]] || die "VIDEO_UPSCALE_TAILSCALE_HTTPS_PORT must be numeric"
+  [[ "$VIDEO_UPSCALE_DISK_RESERVE_GB" == <-> ]] || die "VIDEO_UPSCALE_DISK_RESERVE_GB must be numeric"
+  [[ "$PYTORCH_MPS_HIGH_WATERMARK_RATIO" == <->.<-> ]] || die "PYTORCH_MPS_HIGH_WATERMARK_RATIO must be a decimal"
+  [[ "$PYTORCH_MPS_LOW_WATERMARK_RATIO" == <->.<-> ]] || die "PYTORCH_MPS_LOW_WATERMARK_RATIO must be a decimal"
+  [[ "$VIDEO_UPSCALE_PYTHON_VERSION" == <->.<->.<-> ]] || die "VIDEO_UPSCALE_PYTHON_VERSION must be an exact X.Y.Z version"
+  for numeric_value in VIDEO_UPSCALE_FFPROBE_TIMEOUT_SECONDS VIDEO_UPSCALE_UPLOAD_IDLE_TIMEOUT_SECONDS \
+    VIDEO_UPSCALE_UPLOAD_TOTAL_TIMEOUT_SECONDS VIDEO_UPSCALE_MAX_DURATION_SECONDS \
+    VIDEO_UPSCALE_MAX_SOURCE_DIMENSION VIDEO_UPSCALE_MAX_SOURCE_PIXELS VIDEO_UPSCALE_MAX_SOURCE_FRAME_RATE \
+    VIDEO_UPSCALE_MAX_SOURCE_FRAMES VIDEO_UPSCALE_MAX_PENDING_JOBS VIDEO_UPSCALE_MAX_RETAINED_JOBS \
+    VIDEO_UPSCALE_MAX_PROCESS_SECONDS VIDEO_UPSCALE_MAX_JOB_LOG_BYTES VIDEO_UPSCALE_MAX_JOB_ARTIFACT_BYTES; do
+    [[ "${(P)numeric_value}" == <-> ]] || die "$numeric_value must be numeric"
+  done
+
+  export VIDEO_UPSCALE_PROJECT_ROOT VIDEO_UPSCALE_RUNTIME_ROOT VIDEO_UPSCALE_DATA_ROOT
+  export VIDEO_UPSCALE_COMFY_DIR VIDEO_UPSCALE_SEEDVR2_DIR VIDEO_UPSCALE_SEEDVR2_CLI
+  export VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI VIDEO_UPSCALE_SEEDVR2_MODEL_DIR VIDEO_UPSCALE_PYTHON
+  export VIDEO_UPSCALE_BACKEND_PYTHON VIDEO_UPSCALE_BACKEND_MODULE VIDEO_UPSCALE_APP_PORT
+  export VIDEO_UPSCALE_COMFY_PORT VIDEO_UPSCALE_TAILSCALE_HTTPS_PORT VIDEO_UPSCALE_DISK_RESERVE_GB
+  export VIDEO_UPSCALE_DEFAULT_PROFILE VIDEO_UPSCALE_SEEDVR2_3B_MODEL VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL
+  export VIDEO_UPSCALE_FFMPEG VIDEO_UPSCALE_FFPROBE
+  export VIDEO_UPSCALE_ACCESS_USERNAME VIDEO_UPSCALE_ACCESS_TOKEN_FILE
+  export VIDEO_UPSCALE_PYTHON_VERSION VIDEO_UPSCALE_FFPROBE_TIMEOUT_SECONDS
+  export VIDEO_UPSCALE_UPLOAD_IDLE_TIMEOUT_SECONDS VIDEO_UPSCALE_UPLOAD_TOTAL_TIMEOUT_SECONDS
+  export VIDEO_UPSCALE_MAX_DURATION_SECONDS VIDEO_UPSCALE_MAX_SOURCE_DIMENSION VIDEO_UPSCALE_MAX_SOURCE_PIXELS
+  export VIDEO_UPSCALE_MAX_SOURCE_FRAME_RATE VIDEO_UPSCALE_MAX_SOURCE_FRAMES
+  export VIDEO_UPSCALE_MAX_PENDING_JOBS VIDEO_UPSCALE_MAX_RETAINED_JOBS
+  export VIDEO_UPSCALE_MAX_PROCESS_SECONDS VIDEO_UPSCALE_MAX_JOB_LOG_BYTES VIDEO_UPSCALE_MAX_JOB_ARTIFACT_BYTES
+  export PYTORCH_MPS_HIGH_WATERMARK_RATIO PYTORCH_MPS_LOW_WATERMARK_RATIO
+  export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+}
+
+assert_safe_data_root() {
+  require_absolute_path VIDEO_UPSCALE_DATA_ROOT "$VIDEO_UPSCALE_DATA_ROOT"
+  [[ "$VIDEO_UPSCALE_DATA_ROOT" == *"VideoUpscaleWebUI"* ]] || die "refusing data-root operation outside VideoUpscaleWebUI path"
+}
+
+available_gib() {
+  df -kP "$1" | awk 'NR == 2 { print int($4 / 1024 / 1024) }'
+}
+
+require_disk_reserve() {
+  local available
+  available="$(available_gib "$VIDEO_UPSCALE_RUNTIME_ROOT" 2>/dev/null || available_gib "$VIDEO_UPSCALE_PROJECT_ROOT")"
+  [[ "$available" == <-> ]] || die "could not determine free disk space"
+  (( available >= VIDEO_UPSCALE_DISK_RESERVE_GB )) || die "only ${available} GiB free; reserve is ${VIDEO_UPSCALE_DISK_RESERVE_GB} GiB"
+}
+
+is_port_listening() {
+  local port="$1"
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+listener_pids() {
+  local port="$1"
+  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u
+}
+
+require_loopback_listener_or_unused() {
+  local port="$1"
+  local listener
+  local addresses
+  listener="$(listener_pids "$port" || true)"
+  [[ -z "$listener" ]] && return
+  addresses="$(lsof -nP -F n -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n 's/^n//p')"
+  [[ -n "$addresses" ]] || die "could not inspect listener address on port $port"
+  if print -r -- "$addresses" | grep -Ev '^(127\.0\.0\.1|\[::1\]|localhost):' >/dev/null; then
+    die "refusing non-loopback listener on port $port"
+  fi
+  return 0
+}
