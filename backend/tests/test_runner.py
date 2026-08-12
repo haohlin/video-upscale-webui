@@ -211,6 +211,60 @@ def test_legacy_progress_continues_work_sequence_after_structured_progress(tmp_p
     assert [report.percent for report in reports] == [91, 92, 92, 93]
 
 
+def test_runner_omits_machine_event_lines_from_visible_job_log(tmp_path):
+    """Persisting canonical EVENT payloads duplicates machine data in operator logs."""
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("# adapter\n")
+    settings = Settings(
+        project_root=tmp_path,
+        runtime_root=tmp_path,
+        data_root=tmp_path,
+        seedvr2_cli=str(adapter),
+        seedvr2_model_dir=tmp_path,
+        python=sys.executable,
+        app_port=8765,
+        disk_reserve_gb=0,
+        default_profile="3b-safe",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+    )
+    (tmp_path / settings.seedvr2_3b_model).write_bytes(b"model")
+    (tmp_path / settings.seedvr2_vae_model).write_bytes(b"vae")
+    runner = SubprocessRunner(settings)
+    event = "EVENT " + json.dumps(
+        {
+            "schema_version": 1,
+            "sequence": 1,
+            "work_sequence": 0,
+            "measured_work": False,
+            "event_type": "heartbeat",
+        }
+    )
+
+    class Process:
+        pid = 1234
+        returncode = 0
+        stdout = io.StringIO(f"human model-loading\n{event}\nhuman ready\n")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    log_path = tmp_path / "job.log"
+    with patch("app.runner.subprocess.Popen", return_value=Process()):
+        runner._run_process(
+            ["adapter"],
+            log_path,
+            lambda _report: None,
+            lambda: False,
+            invocation="full",
+        )
+
+    assert log_path.read_text() == "human model-loading\nhuman ready\n"
+
+
 def test_runner_refuses_to_advertise_ready_before_default_model_is_present(tmp_path):
     """A partial model download must keep WebUI health degraded."""
     adapter = tmp_path / "adapter.py"

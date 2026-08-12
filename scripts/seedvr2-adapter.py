@@ -33,6 +33,54 @@ PROFILE_PARAMETERS = {
 }
 MAX_PROBE_OUTPUT_BYTES = 64 * 1024
 MAX_OUTPUT_LINE_CHARS = 64 * 1024
+MAX_COUNTER = 1_000_000_000
+FORK_EVENT_KEYS = (
+    "schema_version",
+    "sequence",
+    "work_sequence",
+    "measured_work",
+    "event_type",
+    "phase",
+    "current_unit",
+    "total_units",
+    "chunk_index",
+    "chunk_count",
+    "completed_unique_frames",
+    "chunk_unique_frames",
+    "chunk_context_frames",
+    "total_unique_frames",
+    "elapsed_seconds",
+)
+FORK_EVENT_TYPES = frozenset(
+    {
+        "model_preparation_started",
+        "model_preparation_completed",
+        "chunk_started",
+        "phase_progress",
+        "chunk_completed",
+        "heartbeat",
+        "output_started",
+        "completed",
+    }
+)
+FORK_PHASES = frozenset(
+    {"encoding", "upscaling", "decoding", "postprocessing"}
+)
+FORK_COUNTER_KEYS = (
+    "sequence",
+    "work_sequence",
+    "current_unit",
+    "total_units",
+    "chunk_index",
+    "chunk_count",
+    "completed_unique_frames",
+    "chunk_unique_frames",
+    "chunk_context_frames",
+    "total_unique_frames",
+)
+HUMAN_JSON_KEYS = frozenset({"level", "message"})
+HUMAN_JSON_LEVELS = frozenset({"debug", "info", "warning", "error"})
+SENSITIVE_HUMAN_MARKERS = ("/", "\\", "..")
 
 
 def required_environment(name: str) -> str:
@@ -44,6 +92,160 @@ def required_environment(name: str) -> str:
 
 def emit_progress(percent: int, stage: str) -> None:
     print(f"PROGRESS {percent} {stage}", flush=True)
+
+
+def _valid_fork_event(payload: dict[str, object]) -> bool:
+    if set(payload) - set(FORK_EVENT_KEYS):
+        return False
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        return False
+    if type(payload.get("measured_work")) is not bool:
+        return False
+    event_type = payload.get("event_type")
+    if type(event_type) is not str or event_type not in FORK_EVENT_TYPES:
+        return False
+    phase = payload.get("phase")
+    if phase is not None and (type(phase) is not str or phase not in FORK_PHASES):
+        return False
+    for key in FORK_COUNTER_KEYS:
+        value = payload.get(key)
+        if value is not None and (type(value) is not int or not 0 <= value <= MAX_COUNTER):
+            return False
+    sequence = payload.get("sequence")
+    work_sequence = payload.get("work_sequence")
+    if type(sequence) is not int or type(work_sequence) is not int:
+        return False
+    if work_sequence > sequence:
+        return False
+    current_unit = payload.get("current_unit")
+    total_units = payload.get("total_units")
+    if current_unit is not None and total_units is not None and current_unit > total_units:
+        return False
+    chunk_index = payload.get("chunk_index")
+    chunk_count = payload.get("chunk_count")
+    if chunk_index is not None and chunk_index < 1:
+        return False
+    if chunk_index is not None and chunk_count is not None and chunk_index > chunk_count:
+        return False
+    elapsed_seconds = payload.get("elapsed_seconds")
+    if elapsed_seconds is not None and (
+        type(elapsed_seconds) not in {int, float}
+        or not math.isfinite(elapsed_seconds)
+        or not 0 <= elapsed_seconds <= MAX_COUNTER
+    ):
+        return False
+
+    measured_work = payload["measured_work"]
+    completed_unique_frames = payload.get("completed_unique_frames")
+    chunk_unique_frames = payload.get("chunk_unique_frames")
+    chunk_context_frames = payload.get("chunk_context_frames")
+    total_unique_frames = payload.get("total_unique_frames")
+    if event_type == "phase_progress":
+        required = (
+            phase,
+            current_unit,
+            total_units,
+            chunk_index,
+            chunk_count,
+            completed_unique_frames,
+            chunk_unique_frames,
+            chunk_context_frames,
+            total_unique_frames,
+        )
+        if any(value is None for value in required):
+            return False
+        assert type(total_units) is int
+        assert type(chunk_unique_frames) is int
+        assert type(total_unique_frames) is int
+        assert type(completed_unique_frames) is int
+        if (
+            not measured_work
+            or total_units <= 0
+            or chunk_unique_frames <= 0
+            or total_unique_frames <= 0
+            or completed_unique_frames + chunk_unique_frames > total_unique_frames
+        ):
+            return False
+    elif event_type == "chunk_completed":
+        required = (
+            chunk_index,
+            chunk_count,
+            completed_unique_frames,
+            chunk_unique_frames,
+            total_unique_frames,
+        )
+        if any(value is None for value in required):
+            return False
+        assert type(chunk_unique_frames) is int
+        assert type(completed_unique_frames) is int
+        assert type(total_unique_frames) is int
+        if (
+            not measured_work
+            or chunk_unique_frames != 0
+            or total_unique_frames <= 0
+            or completed_unique_frames > total_unique_frames
+        ):
+            return False
+    elif event_type == "heartbeat" and measured_work:
+        return False
+    return True
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+
+def _safe_human_json(payload: object) -> bool:
+    if not isinstance(payload, dict) or set(payload) != HUMAN_JSON_KEYS:
+        return False
+    level = payload.get("level")
+    message = payload.get("message")
+    return bool(
+        type(level) is str
+        and level in HUMAN_JSON_LEVELS
+        and type(message) is str
+        and 0 < len(message) <= MAX_OUTPUT_LINE_CHARS
+        and not any(marker in message for marker in SENSITIVE_HUMAN_MARKERS)
+    )
+
+
+def forward_seedvr2_line(line: str) -> None:
+    stripped = line.rstrip("\r\n")
+    if len(stripped) > MAX_OUTPUT_LINE_CHARS:
+        if stripped.lstrip().startswith(("{", "[")):
+            return
+        print(stripped[:MAX_OUTPUT_LINE_CHARS], flush=True)
+        return
+    try:
+        payload = json.loads(
+            stripped,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        if stripped.lstrip().startswith(("{", "[")):
+            return
+        print(stripped, flush=True)
+        return
+    if _safe_human_json(payload):
+        print(stripped, flush=True)
+        return
+    if not isinstance(payload, dict) or not _valid_fork_event(payload):
+        return
+    canonical = {key: payload[key] for key in FORK_EVENT_KEYS if key in payload}
+    print(
+        "EVENT " + json.dumps(canonical, separators=(",", ":"), allow_nan=False),
+        flush=True,
+    )
 
 
 def positive_finite_float(value: str) -> float:
@@ -122,7 +324,11 @@ def run_command(command: list[str]) -> None:
     previous_int = signal.signal(signal.SIGINT, terminate_child)
     try:
         while line := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
-            print(line, end="", flush=True)
+            forward_seedvr2_line(line)
+            if len(line) > MAX_OUTPUT_LINE_CHARS and not line.endswith(("\n", "\r")):
+                while remainder := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
+                    if remainder.endswith(("\n", "\r")):
+                        break
         if process.wait() != 0:
             raise RuntimeError(f"SeedVR2 CLI exited with {process.returncode}")
     finally:
@@ -288,6 +494,8 @@ def build_seedvr2_command(
         str(output_path),
         "--output_format",
         "mp4",
+        "--progress_format",
+        "jsonl",
         "--video_backend",
         "ffmpeg",
         "--10bit",

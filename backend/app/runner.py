@@ -271,14 +271,18 @@ class SubprocessRunner:
             nonlocal last_legacy_percent, last_nonterminal_report_at
             nonlocal last_seen_work_sequence, last_sequence, log_bytes_written
             line = line[:MAX_OUTPUT_LINE_CHARS]
-            if log_file and log_bytes_written < self._settings.max_job_log_bytes:
+            stripped = line.strip()
+            if (
+                not stripped.startswith("EVENT ")
+                and log_file
+                and log_bytes_written < self._settings.max_job_log_bytes
+            ):
                 remaining = self._settings.max_job_log_bytes - log_bytes_written
                 encoded = (line + "\n").encode("utf-8")[:remaining]
                 persisted = encoded.decode("utf-8", errors="ignore")
                 log_file.write(persisted)
                 log_file.flush()
                 log_bytes_written += len(persisted.encode("utf-8"))
-            stripped = line.strip()
             event = parse_progress_line(stripped)
             if event is not None:
                 if event.sequence <= last_sequence:

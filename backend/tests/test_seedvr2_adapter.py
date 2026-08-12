@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import sys
 import threading
 from pathlib import Path
@@ -74,6 +75,166 @@ def test_adapter_uses_selected_seedvr2_target_short_side(
     assert "--use_cache" not in command
     assert "--cache_model" not in command
     assert "--cache_device" not in command
+
+
+def test_official_command_opts_into_jsonl_progress(tmp_path):
+    adapter = load_adapter()
+    command = adapter.build_seedvr2_command(
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "out.mp4",
+        model_dir=tmp_path / "models",
+        model_name="3b.safetensors",
+        preset="3b-safe",
+        color_correction="lab",
+        source_width=1920,
+        source_height=1080,
+        output_scale=1.0,
+        python="python",
+        official_cli=tmp_path / "inference_cli.py",
+    )
+
+    assert command[command.index("--progress_format") + 1] == "jsonl"
+
+
+def test_adapter_bridges_only_safe_fork_json_events(capsys):
+    adapter = load_adapter()
+    safe = json.dumps(
+        {
+            "schema_version": 1,
+            "sequence": 1,
+            "work_sequence": 0,
+            "measured_work": False,
+            "event_type": "heartbeat",
+            "elapsed_seconds": 2.0,
+        }
+    )
+    leaked = json.dumps(
+        {
+            "schema_version": 1,
+            "sequence": 2,
+            "work_sequence": 0,
+            "measured_work": False,
+            "event_type": "heartbeat",
+            "input_path": "/Users/private/movie.mp4",
+        }
+    )
+
+    adapter.forward_seedvr2_line(safe)
+    adapter.forward_seedvr2_line(leaked)
+
+    output = capsys.readouterr().out.splitlines()
+    assert output == [
+        'EVENT {"schema_version":1,"sequence":1,"work_sequence":0,'
+        '"measured_work":false,"event_type":"heartbeat",'
+        '"elapsed_seconds":2.0}'
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schema_version": 1,
+            "sequence": 1,
+            "work_sequence": 0,
+            "measured_work": False,
+            "event_type": "heartbeat",
+            "debug": "safe-looking but untrusted",
+        },
+        {
+            "schema_version": 1,
+            "sequence": True,
+            "work_sequence": 0,
+            "measured_work": False,
+            "event_type": "heartbeat",
+        },
+        {
+            "schema_version": 1,
+            "sequence": 1,
+            "work_sequence": 0,
+            "measured_work": True,
+            "event_type": "heartbeat",
+        },
+        {
+            "schema_version": 1,
+            "sequence": 1,
+            "work_sequence": 0,
+            "measured_work": True,
+            "event_type": "phase_progress",
+            "phase": "encoding",
+        },
+        '{"schema_version":1,"sequence":1,"sequence":2,'
+        '"work_sequence":0,"measured_work":false,"event_type":"heartbeat"}',
+    ],
+)
+def test_adapter_drops_untrusted_or_incomplete_json_instead_of_promoting_it(
+    capsys, payload
+):
+    adapter = load_adapter()
+
+    encoded = payload if isinstance(payload, str) else json.dumps(payload)
+    adapter.forward_seedvr2_line(encoded)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_adapter_flushes_harmless_human_output_immediately():
+    adapter = load_adapter()
+
+    with patch("builtins.print") as output:
+        adapter.forward_seedvr2_line("model-loading\n")
+
+    output.assert_called_once_with("model-loading", flush=True)
+
+
+def test_adapter_preserves_harmless_non_event_json_as_human_output(capsys):
+    adapter = load_adapter()
+    human = '{"level":"info","message":"model loaded"}'
+
+    adapter.forward_seedvr2_line(human)
+
+    assert capsys.readouterr().out == human + "\n"
+
+
+def test_adapter_drops_non_event_json_containing_a_private_path(capsys):
+    adapter = load_adapter()
+    leaked = '{"level":"debug","message":"opened /Users/private/movie.mp4"}'
+
+    adapter.forward_seedvr2_line(leaked)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_adapter_drops_oversized_jsonl_without_leaking_tail(capsys):
+    adapter = load_adapter()
+    oversized = '{"schema_version":1,"debug":"' + "x" * (
+        adapter.MAX_OUTPUT_LINE_CHARS + 1
+    ) + '/Users/private/movie.mp4"}'
+
+    adapter.forward_seedvr2_line(oversized)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_run_command_discards_oversized_jsonl_tail_without_leaking_path(capsys):
+    adapter = load_adapter()
+    oversized = '{"schema_version":1,"debug":"' + "x" * (
+        adapter.MAX_OUTPUT_LINE_CHARS + 1
+    ) + '/Users/private/movie.mp4"}\nmodel-ready\n'
+    process = SimpleNamespace(
+        stdout=io.StringIO(oversized),
+        returncode=0,
+        poll=lambda: 0,
+        wait=lambda: 0,
+        terminate=lambda: None,
+    )
+
+    with patch.object(adapter.subprocess, "Popen", return_value=process), patch.object(
+        adapter.signal, "signal", return_value=adapter.signal.SIG_DFL
+    ):
+        adapter.run_command(["seedvr2"])
+
+    assert capsys.readouterr().out == "model-ready\n"
 
 
 def test_final_mp4_contract_is_hevc_main10_and_transcodes_audio(tmp_path):
