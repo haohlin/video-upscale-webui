@@ -379,6 +379,19 @@ def test_run_command_discards_oversized_cr_split_tail_without_leaking_path(capsy
     assert capsys.readouterr().out == "model-ready\n"
 
 
+def test_run_command_preserves_raw_cr_when_discarding_real_child_output(capsys):
+    adapter = load_adapter()
+    script = (
+        "import os; "
+        f"os.write(1, b'{{' + b'x' * {adapter.MAX_OUTPUT_LINE_CHARS - 1} + "
+        "b'\\r/Users/private/movie.mp4\\nmodel-ready\\n')"
+    )
+
+    adapter.run_command([sys.executable, "-c", script])
+
+    assert capsys.readouterr().out == "model-ready\n"
+
+
 def test_final_mp4_contract_is_hevc_main10_and_transcodes_audio(tmp_path):
     """Dropping HEVC Main10 or AAC audio output guarantees must make this test fail."""
     adapter = load_adapter()

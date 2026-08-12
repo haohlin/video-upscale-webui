@@ -344,7 +344,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def run_command(command: list[str]) -> None:
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     assert process.stdout is not None
 
     def terminate_child(signum: int, _frame: object) -> None:
@@ -356,10 +356,17 @@ def run_command(command: list[str]) -> None:
     previous_int = signal.signal(signal.SIGINT, terminate_child)
     try:
         while line := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
-            forward_seedvr2_line(line)
-            if len(line) > MAX_OUTPUT_LINE_CHARS and not line.endswith("\n"):
+            text_line = (
+                line.decode("utf-8", errors="replace")
+                if isinstance(line, bytes)
+                else line
+            )
+            forward_seedvr2_line(text_line)
+            newline = b"\n" if isinstance(line, bytes) else "\n"
+            if len(line) > MAX_OUTPUT_LINE_CHARS and not line.endswith(newline):
                 while remainder := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
-                    if remainder.endswith("\n"):
+                    newline = b"\n" if isinstance(remainder, bytes) else "\n"
+                    if remainder.endswith(newline):
                         break
         if process.wait() != 0:
             raise RuntimeError(f"SeedVR2 CLI exited with {process.returncode}")
