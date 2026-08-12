@@ -1477,16 +1477,16 @@ Default `--progress_format none` preserves existing human-readable output. JSONL
 Multi-GPU phase progress is not included in this first version. Absence of heartbeat does not cancel inference; callers retain their own deadline and cancellation policy.
 ````
 
-- [ ] **Step 2: Run deterministic test suite twice to catch heartbeat leaks**
+- [ ] **Step 2: Run deterministic curated release gate twice to catch heartbeat leaks**
 
-Run:
+From the WebUI checkout, run:
 
 ```bash
-python -m unittest discover -s tests -p 'test_*.py' -v
-python -m unittest discover -s tests -p 'test_*.py' -v
+SEEDVR2_FORK_ROOT=/path/to/ComfyUI-SeedVR2_VideoUpscaler scripts/test-release.sh
+SEEDVR2_FORK_ROOT=/path/to/ComfyUI-SeedVR2_VideoUpscaler scripts/test-release.sh
 ```
 
-Expected: both runs PASS and process exits without lingering `seedvr2-progress-heartbeat` thread.
+Expected: both count-bounded release runs PASS and process exits without lingering `seedvr2-progress-heartbeat` thread. Full unittest discovery remains an opt-in diagnostic.
 
 - [ ] **Step 3: Inspect exact fork diff and ancestry**
 
@@ -1524,7 +1524,7 @@ Expected: no unresolved high- or critical-severity findings. Fix validated findi
 Run:
 
 ```bash
-python -m unittest discover -s tests -p 'test_*.py' -v
+SEEDVR2_FORK_ROOT=/path/to/ComfyUI-SeedVR2_VideoUpscaler scripts/test-release.sh
 git diff --check upstream/main...HEAD
 git status --short
 ```

@@ -4,6 +4,8 @@
 
 Runtime assets live under `~/Library/Application Support/VideoUpscaleWebUI`, outside this Git repository. `start-local.sh` builds Vite frontend before FastAPI starts; FastAPI serves that built WebUI at `/` and keeps its API under `/api`. A generated Basic credential protects all UI and job routes; only `/api/health` remains unauthenticated. The browser app is only service published through Tailscale. FastAPI listens on `127.0.0.1:8000`; optional ComfyUI listens on `127.0.0.1:8188`; neither binds to LAN or public interfaces.
 
+Normal pre-deployment verification is `scripts/test-release.sh`, followed by `cd frontend && npm run build`. The release manifest currently contains 47 deterministic cases: 27 backend, 10 frontend, and 10 fork, with two slots reserved for active-job installer safety. Full pytest, Vitest, and unittest discovery are retained only for opt-in diagnosis. Future release-critical tests must fit within the 49-test ceiling.
+
 SeedVR2 runs through its official standalone CLI located under the isolated ComfyUI custom node. Backend invokes tracked `scripts/seedvr2-adapter.py`; adapter maps stable profile arguments to upstream CLI arguments, keeps every process invocation as an argument array, then remuxes source audio into final MP4. `deploy/runtime.env` provides absolute adapter, official CLI, Python, model-directory, FFmpeg, and FFprobe paths. Never interpolate filenames into a shell command.
 
 Default profile is `3b-safe`: 2x, batch size 5, chunk size 25, temporal overlap 4, tiled VAE, LAB color correction, no BlockSwap and no overflow/swap mode. `7b-fp8-experimental` remains opt-in and must pass the 10-second, maximum-480p probe first. No automatic downgrade or second 2x pass is allowed.

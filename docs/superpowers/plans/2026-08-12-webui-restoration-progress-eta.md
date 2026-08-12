@@ -1223,7 +1223,7 @@ In API test, inspect sent `FormData` and assert `body.get("output_scale") === "0
 
 - [ ] **Step 2: Run API test and verify failure**
 
-Run: `cd frontend && npm test -- src/__tests__/api.test.ts`
+Run: `cd frontend && npm run test:exhaustive -- src/__tests__/api.test.ts`
 
 Expected: FAIL because scale argument/form field does not exist.
 
@@ -1291,7 +1291,7 @@ Add `.scale-fieldset`, `.scale-option`, `.job-timing`, `.eta-confidence`, and `.
 
 - [ ] **Step 8: Run frontend tests/build and commit**
 
-Run: `cd frontend && npm test`
+Run: `cd frontend && npm run test:exhaustive`
 
 Expected: PASS.
 
@@ -1444,13 +1444,13 @@ git add scripts/runtime-update-gate.py scripts/install-runtime.sh backend/tests/
 git commit -m "chore: pin reviewed SeedVR2 progress fork"
 ```
 
-### Task 9: Documentation, Full Verification, Security Scan, and Deferred Deployment
+### Task 9: Documentation, Curated Release Verification, Security Scan, and Deferred Deployment
 
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/architecture.md`
 - Modify: `docs/runtime.md`
-- Test: all backend/frontend suites
+- Test: count-bounded cross-repository release manifest
 
 **Interfaces:**
 - Consumes: Tasks 1-8 and exact fork commit.
@@ -1462,17 +1462,17 @@ Document all four scale labels and pixel-cost meaning; explain downscaled modes 
 
 In `docs/runtime.md`, record exact fork origin, upstream remote, feature branch, literal pinned revision, fork update review procedure, `--dry-run --update`, and terminal-job gate. Keep loopback/Tailscale/Funnel/auth requirements unchanged.
 
-- [ ] **Step 2: Run full backend verification**
+- [ ] **Step 2: Run curated cross-repository release verification**
 
-Run: `cd backend && uv sync --locked && uv run --group dev pytest -v`
+Run: `cd backend && uv sync --locked && cd .. && scripts/test-release.sh`
 
-Expected: all backend tests PASS; no warnings indicating schema, task, or collector leaks.
+Expected before Task 8: exactly 47 tests PASS: 27 backend, 10 frontend, and 10 SeedVR2 fork, leaving two reserved slots for exact active-job installer safety nodes. Gate fails before execution for zero tests, more than 49 tests, duplicate names, or missing exact test names. It covers scale admission and target sizing, progress schema and real fork bridge, output validation, nonzero exit handling and cancellation, ETA/calibration/stale/timing persistence, frontend scale/progress/ETA/API behavior, fork lifecycle, and all seven security regression boundaries. Task 8 may fill the two reserved slots without raising the ceiling.
 
-- [ ] **Step 3: Run full frontend verification**
+- [ ] **Step 3: Build frontend**
 
-Run: `cd frontend && npm ci --ignore-scripts && npm test && npm run build`
+Run: `cd frontend && npm ci --ignore-scripts && npm run build`
 
-Expected: all Vitest tests PASS; TypeScript and Vite production build PASS.
+Expected: TypeScript and Vite production build PASS. Full pytest, Vitest, and unittest discovery remain opt-in diagnostics, not normal completion or deployment gates.
 
 - [ ] **Step 4: Run repository system and dry-run checks**
 

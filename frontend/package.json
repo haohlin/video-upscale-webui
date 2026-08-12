@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "vitest run",
+    "test": "../scripts/test-release.sh",
+    "test:exhaustive": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {

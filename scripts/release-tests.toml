@@ -1,0 +1,77 @@
+max_tests = 49
+
+# Keep exact pytest node IDs. Parameterized cases must name one concrete case.
+[backend]
+tests = [
+  # Scale admission and deterministic target sizing.
+  "tests/test_jobs.py::test_upload_defaults_to_original_resolution_and_exposes_target_dimensions",
+  "tests/test_jobs.py::test_upload_accepts_fixed_output_scale_allowlist[0.25]",
+  "tests/test_jobs.py::test_upload_rejects_non_allowlisted_output_scale[1;touch /tmp/pwned]",
+  "tests/test_jobs.py::test_target_dimensions_enforce_edge_and_pixel_ceiling[4096-2160-2.0-Target longest edge must not exceed 7680 pixels]",
+  "tests/test_jobs.py::test_target_dimensions_enforce_edge_and_pixel_ceiling[3840-2162-2.0-Target pixel count must not exceed 33177600 pixels]",
+
+  # Output validation, cancellation, and bounded subprocess handling.
+  "tests/test_jobs.py::test_output_mismatch_fails_job_before_completion",
+  "tests/test_jobs.py::test_queued_job_can_be_cancelled_without_running",
+  "tests/test_runner.py::test_cancellation_terminates_and_kills_adapter_process_group_before_returning",
+  "tests/test_runner.py::test_final_output_ffprobe_metadata_is_bounded",
+
+  # Strict progress schema and real fork-to-WebUI bridge.
+  "tests/test_progress.py::test_parse_progress_line_accepts_only_bounded_schema_v1_primitives",
+  "tests/test_progress.py::test_temporal_overlap_never_counts_twice",
+  "tests/test_seedvr2_adapter.py::test_adapter_bridges_every_event_shape_emitted_by_actual_fork_reporter",
+  "tests/test_runner.py::test_structured_progress_sequence_and_rate_limit_are_scoped_per_invocation",
+  "tests/test_runner.py::test_runner_omits_machine_event_lines_from_visible_job_log",
+
+  # ETA calibration, timing persistence, and distinct stale signals.
+  "tests/test_eta.py::test_no_measured_unit_and_no_history_is_calibrating",
+  "tests/test_eta.py::test_one_comparable_run_returns_wide_low_confidence_range",
+  "tests/test_eta.py::test_mismatched_failed_nonfinite_and_extreme_samples_do_not_change_range",
+  "tests/test_jobs.py::test_timing_and_monotonic_report_freshness_are_persisted",
+  "tests/test_jobs.py::test_invocation_sequence_resets_between_preflight_and_full",
+  "tests/test_jobs.py::test_phase_metrics_publish_anonymized_performance_samples_and_cascade",
+  "tests/test_jobs.py::test_phase_metrics_reject_completion_after_stale_reporting_gap",
+  "tests/test_jobs.py::test_phase_metrics_reject_completion_when_heartbeat_is_fresh_but_work_is_stale",
+  "tests/test_jobs.py::test_timing_public_job_separates_heartbeat_and_work_staleness",
+  "tests/test_jobs.py::test_api_eta_exposes_measured_source_from_completed_current_run_chunks",
+  "tests/test_jobs.py::test_api_eta_learns_anonymous_history_without_job_rows_or_profile_noise",
+
+  # Installer provenance plus one representative bounded-upload boundary.
+  # Two slots stay reserved for active-job update-gate coverage when Task 8
+  # lands; add exact nodes here without raising max_tests.
+  "tests/test_install_security.py::test_runtime_checkout_verifies_origin_and_clean_worktree",
+  "tests/test_upload_guard.py::test_chunked_upload_is_rejected_before_downstream_multipart_parser_can_read_past_limit",
+]
+
+# Names match `vitest list --json` exactly. Runner converts Vitest's display
+# separator only when building its anchored test-name expression.
+[frontend]
+tests = [
+  "App > shows upload controls and server-configured output scale choices",
+  "App > submits selected video and server-configured output scale",
+  "App > uses runtime-configured defaults instead of hard-coded UI defaults",
+  "App > previews local output dimensions and revokes object URLs on replacement and unmount",
+  "App > shows measured progress, phase counters, server ETA, and a live elapsed timer",
+  "App > calibrates without inventing a percentage when progress source is none",
+  "App > warns when heartbeat is stale and hides ETA",
+  "App > distinguishes live heartbeat from stale measured work and hides ETA",
+  "createJob > uses browser upload events to report measured transfer progress",
+  "createJob > submits the selected output scale in multipart form data",
+]
+
+# Two lifecycle contracts plus one regression for each reviewed security finding:
+# mutable action, shared-stdout injection, incomplete output, unbounded multi-GPU
+# wait, unbounded media workload, weak model-cache validation, and symlink writes.
+[fork]
+tests = [
+  "tests.test_cli_progress.ProgressReporterTests.test_jsonl_event_has_stable_schema_sequence_and_flush",
+  "tests.test_inference_cli_progress.CliProgressLifecycleTests.test_jsonl_cli_emits_preparation_then_completed",
+  "tests.test_security_remediations.SecurityRemediationTests.test_publish_workflow_uses_only_full_commit_shas_with_version_comments",
+  "tests.test_security_remediations.SecurityRemediationTests.test_jsonl_stdout_contains_only_validated_events_when_human_output_is_crafted",
+  "tests.test_security_remediations.SecurityRemediationTests.test_ffmpeg_nonzero_exit_is_fatal",
+  "tests.test_security_remediations.SecurityRemediationTests.test_partial_video_decode_is_rejected",
+  "tests.test_security_remediations.SecurityRemediationTests.test_multi_gpu_exited_worker_fails_bounded_poll",
+  "tests.test_security_remediations.SecurityRemediationTests.test_cli_rejects_oversized_dimensions_before_frame_decode",
+  "tests.test_security_remediations.SecurityRemediationTests.test_model_cache_hit_is_bound_to_expected_sha256",
+  "tests.test_security_remediations.SecurityRemediationTests.test_validation_cache_symlink_does_not_overwrite_target",
+]
