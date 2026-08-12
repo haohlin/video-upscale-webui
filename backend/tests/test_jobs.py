@@ -671,6 +671,38 @@ def test_active_job_progress_is_capped_below_validated_completion(tmp_path):
     assert completed.progress == 100
 
 
+@pytest.mark.parametrize("active_status", ["running", "preflight"])
+def test_progress_update_normalizes_stale_active_100_to_99(tmp_path, active_status):
+    """A persisted active 100 from older code must be repaired on next update."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    input_path = store.inputs / f"{active_status}.mp4"
+    input_path.write_bytes(b"input")
+    job = store.create(
+        job_id=f"stale-{active_status}",
+        original_filename=input_path.name,
+        input_path=input_path,
+        output_path=store.results / f"stale-{active_status}.mp4",
+        log_path=store.logs / f"stale-{active_status}.log",
+        preset="3b-safe",
+        color_correction="lab",
+        media=MediaInfo(duration_seconds=1, width=320, height=180),
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute(
+            "UPDATE jobs SET status = ?, progress = 100 WHERE id = ?",
+            (active_status, job.id),
+        )
+
+    store.update_progress(job.id, 98, "post-upgrade-progress")
+
+    normalized = store.get(job.id)
+    assert normalized is not None
+    assert normalized.status == active_status
+    assert normalized.progress == 99
+    assert normalized.stage == "post-upgrade-progress"
+
+
 def test_restart_marks_interrupted_job_failed_and_resumes_queued_work(tmp_path):
     """Leaving a stale running job blocking queued work after restart must make this test fail."""
     store = JobStore(tmp_path)
