@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from app.progress import parse_progress_line
+
 
 def load_adapter():
     path = Path(__file__).parents[2] / "scripts" / "seedvr2-adapter.py"
@@ -17,6 +19,20 @@ def load_adapter():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_fork_progress_reporter():
+    for parent in Path(__file__).parents:
+        path = parent / "ComfyUI-SeedVR2_VideoUpscaler" / "src" / "cli_progress.py"
+        if path.is_file():
+            break
+    else:
+        raise AssertionError("pinned SeedVR2 fork ProgressReporter is unavailable")
+    spec = importlib.util.spec_from_file_location("seedvr2_cli_progress", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ProgressReporter
 
 
 def test_adapter_streams_short_output_before_child_exit():
@@ -130,6 +146,112 @@ def test_adapter_bridges_only_safe_fork_json_events(capsys):
     ]
 
 
+def test_adapter_bridges_every_event_shape_emitted_by_actual_fork_reporter(capsys):
+    adapter = load_adapter()
+    reporter_type = load_fork_progress_reporter()
+    stream = io.StringIO()
+    reporter = reporter_type(
+        progress_format="jsonl",
+        stream=stream,
+        clock=lambda: 100.0,
+        heartbeat_interval=3600,
+    )
+    reporter.start()
+    reporter.emit("model_preparation_started", phase="preparing")
+    reporter.emit("model_preparation_completed", phase="preparing")
+    reporter.begin_file()
+    reporter.emit(
+        "chunk_started",
+        phase="encoding",
+        chunk_index=1,
+        chunk_count=1,
+        chunk_unique_frames=5,
+        chunk_context_frames=0,
+        completed_unique_frames=0,
+        total_unique_frames=5,
+    )
+    callback = reporter.phase_callback(
+        chunk_index=1,
+        chunk_count=1,
+        chunk_unique_frames=5,
+        chunk_context_frames=0,
+        completed_unique_frames=0,
+        total_unique_frames=5,
+    )
+    callback(1, 1, 5, "Phase 1: Encoding")
+    callback(1, 1, 5, "Phase 2: Upscaling")
+    callback(1, 1, 5, "Phase 3: Decoding")
+    callback(1, 1, 5, "Phase 4: Post-processing")
+    reporter.emit(
+        "heartbeat",
+        phase="postprocessing",
+        current_unit=1,
+        total_units=1,
+        current_frames=5,
+        chunk_index=1,
+        chunk_count=1,
+        chunk_unique_frames=5,
+        chunk_context_frames=0,
+        completed_unique_frames=0,
+        total_unique_frames=5,
+    )
+    reporter.mark_output_started(
+        chunk_index=1,
+        chunk_count=1,
+        chunk_unique_frames=5,
+        chunk_context_frames=0,
+        completed_unique_frames=0,
+        total_unique_frames=5,
+    )
+    reporter.emit(
+        "chunk_completed",
+        phase="postprocessing",
+        chunk_index=1,
+        chunk_count=1,
+        chunk_unique_frames=5,
+        chunk_context_frames=0,
+        completed_unique_frames=5,
+        total_unique_frames=5,
+    )
+    reporter.emit("completed", phase="completed")
+    reporter.close()
+    actual_events = [json.loads(line) for line in stream.getvalue().splitlines()]
+
+    for event in actual_events:
+        assert "current_frames" in event
+        adapter.forward_seedvr2_line(json.dumps(event))
+    leaked = {**actual_events[0], "input_path": "/Users/private/movie.mp4"}
+    unknown = {**actual_events[0], "event_type": "debug_dump"}
+    path_phase = {**actual_events[0], "phase": "/Users/private"}
+    adapter.forward_seedvr2_line(json.dumps(leaked))
+    adapter.forward_seedvr2_line(json.dumps(unknown))
+    adapter.forward_seedvr2_line(json.dumps(path_phase))
+
+    bridged = capsys.readouterr().out.splitlines()
+    assert len(bridged) == len(actual_events) == 11
+    assert all(parse_progress_line(line) is not None for line in bridged)
+    payloads = [json.loads(line.removeprefix("EVENT ")) for line in bridged]
+    assert [payload["event_type"] for payload in payloads] == [
+        "model_preparation_started",
+        "model_preparation_completed",
+        "chunk_started",
+        "phase_progress",
+        "phase_progress",
+        "phase_progress",
+        "phase_progress",
+        "heartbeat",
+        "output_started",
+        "chunk_completed",
+        "completed",
+    ]
+    assert all("current_frames" not in payload for payload in payloads)
+    assert payloads[0].get("phase") is None
+    assert payloads[8].get("phase") is None
+    assert payloads[9]["chunk_unique_frames"] == 0
+    assert payloads[9]["completed_unique_frames"] == 5
+    assert payloads[10].get("phase") is None
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -223,6 +345,26 @@ def test_run_command_discards_oversized_jsonl_tail_without_leaking_path(capsys):
     ) + '/Users/private/movie.mp4"}\nmodel-ready\n'
     process = SimpleNamespace(
         stdout=io.StringIO(oversized),
+        returncode=0,
+        poll=lambda: 0,
+        wait=lambda: 0,
+        terminate=lambda: None,
+    )
+
+    with patch.object(adapter.subprocess, "Popen", return_value=process), patch.object(
+        adapter.signal, "signal", return_value=adapter.signal.SIG_DFL
+    ):
+        adapter.run_command(["seedvr2"])
+
+    assert capsys.readouterr().out == "model-ready\n"
+
+
+def test_run_command_discards_oversized_cr_split_tail_without_leaking_path(capsys):
+    adapter = load_adapter()
+    prefix = "{" + "x" * (adapter.MAX_OUTPUT_LINE_CHARS - 1) + "\r"
+    assert len(prefix) == adapter.MAX_OUTPUT_LINE_CHARS + 1
+    process = SimpleNamespace(
+        stdout=io.StringIO(prefix + "/Users/private/movie.mp4\nmodel-ready\n"),
         returncode=0,
         poll=lambda: 0,
         wait=lambda: 0,

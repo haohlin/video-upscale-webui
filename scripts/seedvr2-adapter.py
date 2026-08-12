@@ -43,6 +43,7 @@ FORK_EVENT_KEYS = (
     "phase",
     "current_unit",
     "total_units",
+    "current_frames",
     "chunk_index",
     "chunk_count",
     "completed_unique_frames",
@@ -50,6 +51,9 @@ FORK_EVENT_KEYS = (
     "chunk_context_frames",
     "total_unique_frames",
     "elapsed_seconds",
+)
+CANONICAL_EVENT_KEYS = tuple(
+    key for key in FORK_EVENT_KEYS if key != "current_frames"
 )
 FORK_EVENT_TYPES = frozenset(
     {
@@ -64,6 +68,17 @@ FORK_EVENT_TYPES = frozenset(
     }
 )
 FORK_PHASES = frozenset(
+    {
+        "preparing",
+        "encoding",
+        "upscaling",
+        "decoding",
+        "postprocessing",
+        "output",
+        "completed",
+    }
+)
+CANONICAL_PHASES = frozenset(
     {"encoding", "upscaling", "decoding", "postprocessing"}
 )
 FORK_COUNTER_KEYS = (
@@ -71,6 +86,7 @@ FORK_COUNTER_KEYS = (
     "work_sequence",
     "current_unit",
     "total_units",
+    "current_frames",
     "chunk_index",
     "chunk_count",
     "completed_unique_frames",
@@ -123,9 +139,11 @@ def _valid_fork_event(payload: dict[str, object]) -> bool:
         return False
     chunk_index = payload.get("chunk_index")
     chunk_count = payload.get("chunk_count")
-    if chunk_index is not None and chunk_index < 1:
-        return False
-    if chunk_index is not None and chunk_count is not None and chunk_index > chunk_count:
+    if chunk_count and (
+        type(chunk_index) is not int
+        or chunk_index < 1
+        or chunk_index > chunk_count
+    ):
         return False
     elapsed_seconds = payload.get("elapsed_seconds")
     if elapsed_seconds is not None and (
@@ -161,6 +179,8 @@ def _valid_fork_event(payload: dict[str, object]) -> bool:
         if (
             not measured_work
             or total_units <= 0
+            or chunk_index <= 0
+            or chunk_count <= 0
             or chunk_unique_frames <= 0
             or total_unique_frames <= 0
             or completed_unique_frames + chunk_unique_frames > total_unique_frames
@@ -181,8 +201,11 @@ def _valid_fork_event(payload: dict[str, object]) -> bool:
         assert type(total_unique_frames) is int
         if (
             not measured_work
-            or chunk_unique_frames != 0
+            or chunk_index <= 0
+            or chunk_count <= 0
+            or chunk_unique_frames <= 0
             or total_unique_frames <= 0
+            or completed_unique_frames < chunk_unique_frames
             or completed_unique_frames > total_unique_frames
         ):
             return False
@@ -241,7 +264,16 @@ def forward_seedvr2_line(line: str) -> None:
         return
     if not isinstance(payload, dict) or not _valid_fork_event(payload):
         return
-    canonical = {key: payload[key] for key in FORK_EVENT_KEYS if key in payload}
+    canonical = {
+        key: payload[key] for key in CANONICAL_EVENT_KEYS if key in payload
+    }
+    if canonical.get("phase") not in CANONICAL_PHASES:
+        canonical.pop("phase", None)
+    if canonical.get("chunk_index") == 0 and canonical.get("chunk_count") == 0:
+        canonical.pop("chunk_index", None)
+        canonical.pop("chunk_count", None)
+    if canonical.get("event_type") == "chunk_completed":
+        canonical["chunk_unique_frames"] = 0
     print(
         "EVENT " + json.dumps(canonical, separators=(",", ":"), allow_nan=False),
         flush=True,
@@ -325,9 +357,9 @@ def run_command(command: list[str]) -> None:
     try:
         while line := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
             forward_seedvr2_line(line)
-            if len(line) > MAX_OUTPUT_LINE_CHARS and not line.endswith(("\n", "\r")):
+            if len(line) > MAX_OUTPUT_LINE_CHARS and not line.endswith("\n"):
                 while remainder := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
-                    if remainder.endswith(("\n", "\r")):
+                    if remainder.endswith("\n"):
                         break
         if process.wait() != 0:
             raise RuntimeError(f"SeedVR2 CLI exited with {process.returncode}")
