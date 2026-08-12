@@ -167,12 +167,10 @@ def estimate_eta(
         low_seconds = min(low_seconds, central_seconds * 0.8)
         high_seconds = max(high_seconds, central_seconds * 1.2)
 
-    deadline = max(0, int(deadline_seconds))
-    low = min(deadline, max(0, math.floor(low_seconds)))
-    high = min(deadline, max(0, math.ceil(high_seconds)))
-    high = max(low, high)
-    midpoint = (low + high) / 2
-    range_width = high - low
+    evidence_low = max(0, math.floor(low_seconds))
+    evidence_high = max(evidence_low, max(0, math.ceil(high_seconds)))
+    midpoint = (evidence_low + evidence_high) / 2
+    range_width = evidence_high - evidence_low
     if (
         comparable_jobs >= 5
         and current_rate_stable
@@ -184,6 +182,9 @@ def estimate_eta(
         confidence = "medium"
     else:
         confidence = "low"
+    deadline = max(0, int(deadline_seconds))
+    low = min(deadline, evidence_low)
+    high = max(low, min(deadline, evidence_high))
     source = "historical" if historical_groups else "measured"
     if not historical_groups and not has_current_run_sample and current_rate is None:
         return EtaEstimate(None, None, "none", "none")

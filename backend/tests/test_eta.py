@@ -118,6 +118,40 @@ def test_high_confidence_requires_total_width_at_most_twenty_percent_of_midpoint
     )
 
 
+def test_deadline_clamp_never_promotes_wide_evidence_to_high_confidence():
+    factors = [0.7, 0.89, 1.0, 1.11, 1.3]
+    samples = [
+        sample(
+            f"job-{index}",
+            phase,
+            seconds if phase == "encoding" else seconds * factor,
+        )
+        for index, factor in enumerate(factors)
+        for phase, seconds in PHASE_SECONDS.items()
+    ]
+
+    unclamped = estimate_eta(active(), samples, 86_400)
+    clamped = estimate_eta(active(), samples, 500)
+
+    assert unclamped.confidence == "medium"
+    assert 500 < unclamped.low_seconds < unclamped.high_seconds
+    assert clamped == EtaEstimate(500, 500, "medium", "historical")
+
+
+def test_deadline_clamp_preserves_legitimate_high_confidence():
+    samples = [
+        sample(f"job-{index}", phase, seconds)
+        for index in range(5)
+        for phase, seconds in PHASE_SECONDS.items()
+    ]
+
+    unclamped = estimate_eta(active(), samples, 86_400)
+    clamped = estimate_eta(active(), samples, 500)
+
+    assert unclamped.confidence == "high"
+    assert clamped == EtaEstimate(500, 500, "high", "historical")
+
+
 def test_missing_rate_for_any_remaining_phase_is_calibrating():
     samples = [sample(f"job-{index}", "encoding", 100) for index in range(3)]
 
