@@ -6,12 +6,12 @@ Private, Mac-hosted SeedVR2 video-upscaling WebUI for Tailscale-connected device
 
 - Uvicorn and optional ComfyUI bind only to `127.0.0.1`.
 - Tailscale Serve provides private HTTPS; supplied scripts never enable Funnel.
-- Every UI and job route requires a generated HTTP Basic credential. Health stays unauthenticated for local monitoring.
+- Every UI and job route requires Tailscale Serve's `Tailscale-User-Login` header to match `VIDEO_UPSCALE_TAILSCALE_USER_LOGIN`. Health stays unauthenticated for local monitoring.
 - State-changing routes also require a non-simple same-origin header to block browser CSRF.
 - Upload concurrency/time/size, queue depth, media duration/resolution/frame count, parser and processing time, output bytes, disk reserve, and per-job log size are bounded and configurable. Job history and finished results persist until the operator deletes them.
 - Commands use argument arrays, server-generated media paths, allowlisted profiles, and pinned upstream source revisions.
 
-This is a single-operator service. Do not share its generated access token. Tailnet ACLs should permit only that operator's devices.
+This is a single-operator service. Tailnet ACLs should permit only that operator's devices. Direct backend access is unsupported; local processes are trusted because the loopback-only listener cannot distinguish their forged proxy headers.
 
 ## Install
 
@@ -27,9 +27,9 @@ scripts/setup-tailscale-serve.sh --dry-run
 scripts/setup-tailscale-serve.sh --apply
 ```
 
-Installer generates a mode-600 access token at configured `VIDEO_UPSCALE_ACCESS_TOKEN_FILE`. Open that local file to retrieve browser password; username defaults to `video`. Never commit token or `deploy/runtime.env`.
+Set `VIDEO_UPSCALE_TAILSCALE_USER_LOGIN` to the operator's Tailscale login. No local browser key or token exists. Never commit `deploy/runtime.env`.
 
-See [runtime guide](docs/runtime.md) and [architecture](docs/architecture.md). Models, inputs, results, logs, credentials, and runtime state remain outside Git.
+See [runtime guide](docs/runtime.md) and [architecture](docs/architecture.md). Models, inputs, results, logs, local configuration, and runtime state remain outside Git.
 
 ## Verification
 
@@ -39,7 +39,7 @@ Normal completion and release verification uses one deterministic, cross-reposit
 scripts/test-release.sh
 ```
 
-The exact manifest is `scripts/release-tests.toml`. It currently runs 47 representative cases across backend, frontend, and the SeedVR2 fork, leaving two slots for Task 8 installer safety tests. It fails before execution if any selected name is missing, duplicated, or outside the enforced 1–49 budget. Set `SEEDVR2_FORK_ROOT` only when the fork is not beside the main WebUI checkout; set `SEEDVR2_TEST_PYTHON` when its test dependencies use a different Python environment.
+The exact manifest is `scripts/release-tests.toml`. It runs 49 representative cases across backend, frontend, and the SeedVR2 fork, including Tailscale identity and active-job updater safety. It fails before execution if any selected name is missing, duplicated, or outside the enforced 1–49 budget. Set `SEEDVR2_FORK_ROOT` only when the fork is not beside the main WebUI checkout; set `SEEDVR2_TEST_PYTHON` when its test dependencies use a different Python environment.
 
 Exhaustive suites remain opt-in diagnostics:
 

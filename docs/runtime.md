@@ -2,9 +2,9 @@
 
 ## Design boundary
 
-Runtime assets live under `~/Library/Application Support/VideoUpscaleWebUI`, outside this Git repository. `start-local.sh` builds Vite frontend before FastAPI starts; FastAPI serves that built WebUI at `/` and keeps its API under `/api`. A generated Basic credential protects all UI and job routes; only `/api/health` remains unauthenticated. The browser app is only service published through Tailscale. FastAPI listens on `127.0.0.1:8000`; optional ComfyUI listens on `127.0.0.1:8188`; neither binds to LAN or public interfaces.
+Runtime assets live under `~/Library/Application Support/VideoUpscaleWebUI`, outside this Git repository. `start-local.sh` builds Vite frontend before FastAPI starts; FastAPI serves that built WebUI at `/` and keeps its API under `/api`. Every route except `/api/health` requires Tailscale Serve's verified `Tailscale-User-Login` header to match the configured single operator. The browser app is only service published through Tailscale. FastAPI listens on `127.0.0.1:8000`; optional ComfyUI listens on `127.0.0.1:8188`; neither binds to LAN or public interfaces.
 
-Normal pre-deployment verification is `scripts/test-release.sh`, followed by `cd frontend && npm run build`. The release manifest currently contains 47 deterministic cases: 27 backend, 10 frontend, and 10 fork, with two slots reserved for active-job installer safety. Full pytest, Vitest, and unittest discovery are retained only for opt-in diagnosis. Future release-critical tests must fit within the 49-test ceiling.
+Normal pre-deployment verification is `scripts/test-release.sh`, followed by `cd frontend && npm run build`. The release manifest contains 49 deterministic cases: 29 backend, 10 frontend, and 10 fork. Full pytest, Vitest, and unittest discovery are retained only for opt-in diagnosis. Future release-critical tests must fit within the 49-test ceiling.
 
 SeedVR2 runs through its official standalone CLI located under the isolated ComfyUI custom node. Backend invokes tracked `scripts/seedvr2-adapter.py`; adapter maps stable profile arguments to upstream CLI arguments, keeps every process invocation as an argument array, then remuxes source audio into final MP4. `deploy/runtime.env` provides absolute adapter, official CLI, Python, model-directory, FFmpeg, and FFprobe paths. Never interpolate filenames into a shell command.
 
@@ -27,7 +27,7 @@ scripts/setup-tailscale-serve.sh --dry-run
 scripts/setup-tailscale-serve.sh --apply
 ```
 
-`install-runtime.sh --apply --models` downloads only 3B FP8 plus shared VAE through Hugging Face's resumable client and validates each SHA-256 against the pinned SeedVR2 registry. It creates ComfyUI, official `ComfyUI-SeedVR2_VideoUpscaler`, models, logs, `inputs`, `staging`, and `results` under application support; no model/runtime asset enters Git. It also generates a mode-600 browser token at `VIDEO_UPSCALE_ACCESS_TOKEN_FILE` without printing the token. ComfyUI and SeedVR2-node commits are pinned, and their executable Python dependency union installs only from repository-owned `deploy/runtime-requirements.lock` with hash enforcement. Update source pins, lock input, and lock output together. If the app LaunchAgent is already installed, a successful model install restarts that exact service so health changes from degraded to ready.
+`install-runtime.sh --apply --models` downloads only 3B FP8 plus shared VAE through Hugging Face's resumable client and validates each SHA-256 against the pinned SeedVR2 registry. It creates ComfyUI, reviewed `ComfyUI-SeedVR2_VideoUpscaler`, models, logs, `inputs`, `staging`, and `results` under application support; no model/runtime asset enters Git. ComfyUI and SeedVR2-node commits are pinned, and their executable Python dependency union installs only from repository-owned `deploy/runtime-requirements.lock` with hash enforcement. Update source pins, lock input, and lock output together. Applied updates refuse queued, preflight, or running jobs, quiesce the exact LaunchAgent before changing runtime files, and restart it only after successful validation. Migration removes only the old default `${VIDEO_UPSCALE_DATA_ROOT}/access-token`; if an older installation used a custom token path, remove that file manually after confirming the old service is stopped.
 
 Regenerate the runtime lock only after reviewing the pinned upstream requirement files:
 
@@ -37,7 +37,7 @@ uv pip compile deploy/runtime-requirements.in --generate-hashes \
   --output-file deploy/runtime-requirements.lock
 ```
 
-Open the HTTPS URL printed by `tailscale serve status` from a signed-in tailnet browser. Use username `video` (or configured `VIDEO_UPSCALE_ACCESS_USERNAME`) and token-file contents as password. Tailscale Serve is private and uses HTTPS port 8444 by default so it does not replace existing services on ports 443 or 8443. The script never invokes Funnel or enables public exposure.
+Open the HTTPS URL printed by `tailscale serve status` from a browser signed into Tailscale as `VIDEO_UPSCALE_TAILSCALE_USER_LOGIN`. Serve injects the verified login header; no second WebUI password or token is used. Tailscale Serve is private and uses HTTPS port 8444 by default so it does not replace existing services on ports 443 or 8443. The script never invokes Funnel or enables public exposure.
 
 Before entering `--apply`, dry-run every state-changing command. Large install or runtime failure logs appear under configured `VIDEO_UPSCALE_DATA_ROOT/logs`.
 
@@ -66,7 +66,7 @@ curl --fail --silent http://127.0.0.1:8000/api/health
 tailscale serve status
 ```
 
-`check-system.sh` confirms arm64, exact trusted Python, `uv`, Node dependency integrity, `ffmpeg`, `ffprobe`, `libx265`, Tailscale connection, mode-600 access token, free-disk reserve, backend Python, SeedVR2 CLI, and PyTorch MPS. Automatic Python downloads are disabled. Upload time/size, decoded frame workload, processing output, and free-disk reserve are continuously bounded. `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.75` and `PYTORCH_MPS_LOW_WATERMARK_RATIO=0.60` are exported to every adapter/probe process; unlike upstream `0.0` defaults, they retain allocator limits.
+`check-system.sh` confirms arm64, exact trusted Python, `uv`, Node dependency integrity, `ffmpeg`, `ffprobe`, `libx265`, Tailscale connection, configured operator login, free-disk reserve, backend Python, SeedVR2 CLI, and PyTorch MPS. Automatic Python downloads are disabled. Upload time/size, decoded frame workload, processing output, and free-disk reserve are continuously bounded. `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.75` and `PYTORCH_MPS_LOW_WATERMARK_RATIO=0.60` are exported to every adapter/probe process; unlike upstream `0.0` defaults, they retain allocator limits.
 
 Run experimental 7B only with explicit operator intent:
 
@@ -81,7 +81,7 @@ Probe creates a 10-second, 480p-bounded working segment then requests 2x SeedVR2
 ## Required user touchpoints
 
 - Confirm generated `deploy/runtime.env` paths if repository moves. Keep file local.
-- Keep generated access-token file private. Do not commit, paste into issue reports, or share with another operator.
-- Be signed into Tailscale on Mac host and every client. Restrict tailnet ACLs to this single operator's devices.
+- Set `VIDEO_UPSCALE_TAILSCALE_USER_LOGIN` to the one allowed operator; no arbitrary-email development login or fallback credential is supported.
+- Be signed into Tailscale on Mac host and every client. Restrict tailnet ACLs to this single operator's devices and keep Funnel disabled.
 - Allow model download network traffic and reserve enough disk for runtime, model weights, and temporary video work.
 - On iPhone Safari, select upload field then choose Photo Library. This uses browser's native Photos picker; no iOS app or Share extension is required.

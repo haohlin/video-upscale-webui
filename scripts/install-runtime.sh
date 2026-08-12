@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Install isolated ComfyUI + official SeedVR2 node outside this Git checkout.
+# Install isolated ComfyUI + reviewed SeedVR2 fork outside this Git checkout.
 
 set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
@@ -13,7 +13,10 @@ update=0
 # Vetted upstream snapshots. Change intentionally and validate this Mac before
 # updating either value; runtime installation must never silently follow main.
 COMFYUI_REVISION="e651b7bef55a5376343dcb1c0edb79f0142c985e"
-SEEDVR2_NODE_REVISION="4490bd1f482e026674543386bb2a4d176da245b9"
+SEEDVR2_NODE_REVISION="67a7350959eb077d3184faac7afa5449d8cc30a5"
+SEEDVR2_UPSTREAM_REVISION="4490bd1f482e026674543386bb2a4d176da245b9"
+SEEDVR2_FORK_REPOSITORY="https://github.com/haohlin/ComfyUI-SeedVR2_VideoUpscaler.git"
+SEEDVR2_UPSTREAM_REPOSITORY="https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git"
 
 usage() {
   cat <<'EOF'
@@ -42,7 +45,7 @@ done
 (( ! download_7b || download_models )) || die "--with-7b requires --models"
 load_runtime_config
 
-for tool in uv git ffmpeg ffprobe openssl; do
+for tool in uv git ffmpeg ffprobe; do
   require_command "$tool"
 done
 [[ "$(uname -m)" == "arm64" ]] || die "Apple Silicon arm64 required"
@@ -52,6 +55,47 @@ python_candidate="$(uv python find --no-python-downloads --system "$VIDEO_UPSCAL
   || die "trusted Python $VIDEO_UPSCALE_PYTHON_VERSION is not installed; automatic downloads are disabled"
 [[ "$("$python_candidate" -c 'import platform; print(platform.python_version())')" == "$VIDEO_UPSCALE_PYTHON_VERSION" ]] \
   || die "resolved Python does not match VIDEO_UPSCALE_PYTHON_VERSION"
+
+service_was_loaded=0
+service_quiesced=0
+launchctl_path="$(command -v launchctl)" || die "missing required command: launchctl"
+launchagent_domain="gui/$(id -u)/com.haohanl.video-upscale-webui"
+launchagent_plist="$HOME/Library/LaunchAgents/com.haohanl.video-upscale-webui.plist"
+jobs_database="$VIDEO_UPSCALE_DATA_ROOT/jobs.sqlite3"
+legacy_access_token_file="${VIDEO_UPSCALE_DATA_ROOT}/access-token"
+
+report_stopped_service_on_failure() {
+  local exit_status=$?
+  if (( exit_status != 0 && service_quiesced )); then
+    print -u2 -- "runtime update failed; service remains stopped. After inspection, recover with: $launchctl_path bootstrap gui/$(id -u) $launchagent_plist"
+  fi
+}
+
+if (( apply )); then
+  if "$launchctl_path" print "$launchagent_domain" >/dev/null 2>&1; then
+    service_was_loaded=1
+  fi
+  if "$SCRIPT_DIR/runtime-update-gate.py" \
+    --database "$jobs_database" \
+    --launchctl "$launchctl_path" \
+    --domain "$launchagent_domain"; then
+    :
+  else
+    gate_status=$?
+    if (( gate_status == 75 )); then
+      die "refusing runtime update while a queued or active job exists"
+    elif (( gate_status == 76 )); then
+      service_quiesced=$service_was_loaded
+      trap report_stopped_service_on_failure EXIT
+      die "job appeared while stopping service; runtime unchanged"
+    fi
+    service_quiesced=$service_was_loaded
+    trap report_stopped_service_on_failure EXIT
+    die "could not quiesce runtime service"
+  fi
+  service_quiesced=$service_was_loaded
+  trap report_stopped_service_on_failure EXIT
+fi
 
 run() {
   if (( apply )); then
@@ -67,19 +111,35 @@ checkout_pinned_revision() {
   local repository="$1"
   local destination="$2"
   local revision="$3"
+  local expected_upstream="${4:-}"
+  local upstream_revision="${5:-}"
+
+  [[ "$revision" =~ '^[0-9a-f]{40}$' ]] || die "runtime revision must be a literal 40-character SHA"
+  if [[ -n "$expected_upstream" ]]; then
+    [[ "$upstream_revision" =~ '^[0-9a-f]{40}$' ]] \
+      || die "runtime upstream revision must be a literal 40-character SHA"
+  fi
 
   verify_checkout() {
     local actual_origin
+    local actual_upstream
     local ignored_python
     local worktree_status
     actual_origin="$(git -C "$destination" remote get-url origin)"
     [[ "$actual_origin" == "$repository" ]] || die "runtime origin mismatch at $destination"
+    if [[ -n "$expected_upstream" ]]; then
+      actual_upstream="$(git -C "$destination" remote get-url upstream)"
+      [[ "$actual_upstream" == "$expected_upstream" ]] \
+        || die "runtime upstream mismatch at $destination"
+      git -C "$destination" merge-base --is-ancestor "$upstream_revision" "$revision" \
+        || die "runtime revision lacks expected upstream ancestry at $destination"
+    fi
     [[ "$(git -C "$destination" rev-parse HEAD)" == "$revision" ]] \
       || die "runtime revision mismatch at $destination"
     worktree_status="$(git -C "$destination" status --porcelain --untracked-files=all)"
     [[ -z "$worktree_status" ]] || die "runtime checkout is modified at $destination"
     [[ ! -f "$destination/.gitmodules" ]] || die "runtime checkout has unexpected submodules at $destination"
-    if [[ "$repository" == "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git" ]]; then
+    if [[ "$repository" == "$SEEDVR2_FORK_REPOSITORY" ]]; then
       ignored_python="$(git -C "$destination" ls-files --others --ignored --exclude-standard -- '*.py')"
       [[ -z "$ignored_python" ]] || die "runtime checkout contains ignored Python source at $destination"
     fi
@@ -95,12 +155,48 @@ checkout_pinned_revision() {
   }
 
   if [[ -d "$destination/.git" ]]; then
+    local actual_origin
     local current_revision
+    local ignored_python
+    local worktree_status
+    worktree_status="$(git -C "$destination" status --porcelain --untracked-files=all)"
+    [[ -z "$worktree_status" ]] || die "runtime checkout is modified at $destination"
+    [[ ! -f "$destination/.gitmodules" ]] \
+      || die "runtime checkout has unexpected submodules at $destination"
+    if [[ -n "$expected_upstream" ]]; then
+      ignored_python="$(git -C "$destination" ls-files --others --ignored --exclude-standard -- '*.py')"
+      [[ -z "$ignored_python" ]] \
+        || die "runtime checkout contains ignored Python source at $destination"
+    fi
+    actual_origin="$(git -C "$destination" remote get-url origin)"
+    if [[ "$actual_origin" != "$repository" ]]; then
+      if (( update )) && [[ -n "$expected_upstream" && "$actual_origin" == "$expected_upstream" ]]; then
+        run git -C "$destination" remote set-url origin "$repository"
+      else
+        die "runtime origin mismatch at $destination"
+      fi
+    fi
+    if [[ -n "$expected_upstream" ]]; then
+      if git -C "$destination" remote get-url upstream >/dev/null 2>&1; then
+        local actual_upstream
+        actual_upstream="$(git -C "$destination" remote get-url upstream)"
+        [[ "$actual_upstream" == "$expected_upstream" ]] \
+          || die "runtime upstream mismatch at $destination"
+      else
+        run git -C "$destination" remote add upstream "$expected_upstream"
+      fi
+      run git -C "$destination" fetch --depth=1 upstream "$upstream_revision"
+      if (( update )); then
+        run git -C "$destination" fetch --depth=64 origin "$revision"
+      fi
+    fi
     current_revision="$(git -C "$destination" rev-parse HEAD)"
     if [[ "$current_revision" == "$revision" ]]; then
       note "pinned Git checkout present: $destination"
     elif (( update )); then
-      run git -C "$destination" fetch --depth=1 origin "$revision"
+      if [[ -z "$expected_upstream" ]]; then
+        run git -C "$destination" fetch --depth=1 origin "$revision"
+      fi
       run git -C "$destination" checkout --detach "$revision"
     else
       die "runtime revision mismatch at $destination; re-run with --update to use pinned $revision"
@@ -110,10 +206,18 @@ checkout_pinned_revision() {
   else
     run git init "$destination"
     run git -C "$destination" remote add origin "$repository"
-    run git -C "$destination" fetch --depth=1 origin "$revision"
+    if [[ -n "$expected_upstream" ]]; then
+      run git -C "$destination" remote add upstream "$expected_upstream"
+      run git -C "$destination" fetch --depth=1 upstream "$upstream_revision"
+    fi
+    if [[ -n "$expected_upstream" ]]; then
+      run git -C "$destination" fetch --depth=64 origin "$revision"
+    else
+      run git -C "$destination" fetch --depth=1 origin "$revision"
+    fi
     run git -C "$destination" checkout --detach FETCH_HEAD
   fi
-  if (( apply )) || [[ -d "$destination/.git" ]]; then
+  if (( apply )) || (( ! update )) && [[ -d "$destination/.git" ]]; then
     verify_checkout
   fi
 }
@@ -127,16 +231,9 @@ run mkdir -p "$VIDEO_UPSCALE_RUNTIME_ROOT" "$VIDEO_UPSCALE_DATA_ROOT" \
   "$VIDEO_UPSCALE_DATA_ROOT/staging" "$VIDEO_UPSCALE_DATA_ROOT/logs" \
   "$VIDEO_UPSCALE_SEEDVR2_MODEL_DIR"
 
-if [[ ! -f "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE" ]]; then
-  if (( apply )); then
-    umask 077
-    openssl rand -hex 32 > "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE"
-    chmod 600 "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE"
-    note "generated private browser access token at configured token file"
-  else
-    note "+ generate mode-600 browser access token at $VIDEO_UPSCALE_ACCESS_TOKEN_FILE"
-  fi
-fi
+# Old releases created this one credential file. Applied updates reach here only
+# after runtime-update-gate.py has quiesced the service. Never broaden this path.
+run rm -f -- "$legacy_access_token_file"
 
 # This is separate from SeedVR2/ComfyUI Python. It provides FastAPI/Uvicorn
 # expected by start-local.sh at the exact interpreter path in runtime.env.
@@ -151,7 +248,8 @@ if (( apply )); then
 fi
 
 checkout_pinned_revision "https://github.com/Comfy-Org/ComfyUI.git" "$VIDEO_UPSCALE_COMFY_DIR" "$COMFYUI_REVISION"
-checkout_pinned_revision "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git" "$VIDEO_UPSCALE_SEEDVR2_DIR" "$SEEDVR2_NODE_REVISION"
+checkout_pinned_revision "$SEEDVR2_FORK_REPOSITORY" "$VIDEO_UPSCALE_SEEDVR2_DIR" \
+  "$SEEDVR2_NODE_REVISION" "$SEEDVR2_UPSTREAM_REPOSITORY" "$SEEDVR2_UPSTREAM_REVISION"
 
 if (( apply )); then
   [[ -f "$VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI" ]] || die "official SeedVR2 CLI missing after clone: $VIDEO_UPSCALE_SEEDVR2_OFFICIAL_CLI"
@@ -248,11 +346,27 @@ else
   note "models skipped. Install default production model with: scripts/install-runtime.sh --apply --models"
 fi
 
-if (( apply && download_models )) && launchctl print "gui/$(id -u)/com.haohanl.video-upscale-webui" >/dev/null 2>&1; then
-  # A backend started before models existed uses an unavailable runner by design.
-  # Restart the exact app label only after successful model validation.
-  launchctl kickstart -k "gui/$(id -u)/com.haohanl.video-upscale-webui"
-  note "restarted Video Upscale WebUI after runtime install"
+if (( apply )); then
+  if "$SCRIPT_DIR/runtime-update-gate.py" \
+    --database "$jobs_database" \
+    --launchctl "$launchctl_path" \
+    --domain "$launchagent_domain" \
+    --check-only; then
+    :
+  else
+    gate_status=$?
+    if (( gate_status == 75 )); then
+      die "refusing to restart runtime while a queued or active job exists"
+    fi
+    die "could not verify runtime queue before restart"
+  fi
+  if (( service_was_loaded )); then
+    launchctl bootstrap "gui/$(id -u)" "$launchagent_plist"
+    service_was_loaded=0
+    service_quiesced=0
+    note "restarted Video Upscale WebUI after runtime install"
+  fi
+  trap - EXIT
 fi
 
 note "runtime installation complete"

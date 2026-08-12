@@ -10,6 +10,7 @@ DEFAULT_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
 DEFAULT_3B_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 DEFAULT_7B_FP8_MODEL = "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors"
 DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
+ASCII_WHITESPACE = " \t\r\n\v\f"
 
 
 @dataclass(frozen=True)
@@ -33,8 +34,7 @@ class Settings:
     seedvr2_3b_model: str = DEFAULT_3B_MODEL
     seedvr2_7b_fp8_model: str = DEFAULT_7B_FP8_MODEL
     seedvr2_vae_model: str = DEFAULT_VAE_MODEL
-    access_username: str = "video"
-    access_token: str = ""
+    tailscale_user_login: str = ""
     ffprobe_timeout_seconds: int = 30
     upload_idle_timeout_seconds: int = 30
     upload_total_timeout_seconds: int = 6 * 60 * 60
@@ -66,16 +66,11 @@ class Settings:
         data_root = Path(
             os.environ.get("VIDEO_UPSCALE_DATA_ROOT", runtime_root / "data")
         ).expanduser()
-        access_token = os.environ.get("VIDEO_UPSCALE_ACCESS_TOKEN", "")
-        token_file = Path(
-            os.environ.get("VIDEO_UPSCALE_ACCESS_TOKEN_FILE", data_root / "access-token")
-        ).expanduser()
-        if not access_token and token_file.is_file():
-            if token_file.stat().st_mode & 0o077:
-                raise RuntimeError("Video Upscale access token file must use mode 600")
-            access_token = token_file.read_text(encoding="utf-8").strip()
-        if not access_token:
-            raise RuntimeError("Video Upscale access token is not configured")
+        tailscale_user_login = os.environ.get(
+            "VIDEO_UPSCALE_TAILSCALE_USER_LOGIN", ""
+        ).strip(ASCII_WHITESPACE)
+        if not tailscale_user_login:
+            raise RuntimeError("Video Upscale Tailscale user login is not configured")
         model_dir_value = os.environ.get("VIDEO_UPSCALE_SEEDVR2_MODEL_DIR")
         return cls(
             project_root=project_root,
@@ -107,8 +102,7 @@ class Settings:
             seedvr2_7b_fp8_model=os.environ.get(
                 "VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL", DEFAULT_7B_FP8_MODEL
             ),
-            access_username=os.environ.get("VIDEO_UPSCALE_ACCESS_USERNAME", "video"),
-            access_token=access_token,
+            tailscale_user_login=tailscale_user_login,
             ffprobe_timeout_seconds=int(
                 os.environ.get("VIDEO_UPSCALE_FFPROBE_TIMEOUT_SECONDS", "30")
             ),
@@ -166,8 +160,7 @@ class Settings:
             seedvr2_3b_model=self.seedvr2_3b_model,
             seedvr2_7b_fp8_model=self.seedvr2_7b_fp8_model,
             seedvr2_vae_model=self.seedvr2_vae_model,
-            access_username=self.access_username,
-            access_token=self.access_token,
+            tailscale_user_login=self.tailscale_user_login,
             ffprobe_timeout_seconds=self.ffprobe_timeout_seconds,
             upload_idle_timeout_seconds=self.upload_idle_timeout_seconds,
             upload_total_timeout_seconds=self.upload_total_timeout_seconds,

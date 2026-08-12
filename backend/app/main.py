@@ -1,4 +1,3 @@
-import base64
 import secrets
 from dataclasses import replace
 from pathlib import Path
@@ -8,7 +7,7 @@ from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import Settings
+from .config import ASCII_WHITESPACE, Settings
 from .job_service import JobService
 from .job_store import JobStore
 from .media import MediaProbe, SubprocessMediaProbe
@@ -83,17 +82,16 @@ def create_app(
     async def require_operator_authentication(request: Request, call_next):
         if request.url.path == "/api/health":
             return await call_next(request)
-        expected = base64.b64encode(
-            f"{settings.access_username}:{settings.access_token}".encode("utf-8")
-        ).decode("ascii")
+        actual_login = request.headers.get("tailscale-user-login", "").strip(
+            ASCII_WHITESPACE
+        )
         if not secrets.compare_digest(
-            request.headers.get("authorization", ""),
-            f"Basic {expected}",
+            actual_login.casefold().encode("utf-8"),
+            settings.tailscale_user_login.casefold().encode("utf-8"),
         ):
             return JSONResponse(
-                status_code=401,
-                content={"detail": "Authentication required"},
-                headers={"WWW-Authenticate": 'Basic realm="Video Upscale"'},
+                status_code=403,
+                content={"detail": "Tailscale identity is not authorized"},
             )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.headers.get(
             "x-video-upscale-request"

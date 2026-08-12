@@ -1,4 +1,3 @@
-import base64
 import sqlite3
 import threading
 import time
@@ -113,11 +112,10 @@ def make_client(tmp_path, *, runner=None, probe=None, max_upload_bytes=None, **k
 
 
 def make_client_headers_client(app):
-    credentials = base64.b64encode(b"video:test-access-token").decode("ascii")
     return TestClient(
         app,
         headers={
-            "Authorization": f"Basic {credentials}",
+            "Tailscale-User-Login": "haohan.apple@outlook.com",
             "X-Video-Upscale-Request": "1",
         },
     )

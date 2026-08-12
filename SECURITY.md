@@ -4,7 +4,7 @@
 
 Video Upscale WebUI is a single-operator, private service. Supported deployment binds Uvicorn and optional ComfyUI to loopback, publishes only Uvicorn through Tailscale Serve, keeps Funnel disabled, and restricts tailnet ACLs to the operator's devices.
 
-Every UI and job route requires the generated Basic credential. Treat its token file like a password. `/api/health` intentionally exposes only runner readiness for local monitoring.
+Every UI and job route requires Tailscale Serve's verified `Tailscale-User-Login` header to match the configured operator. No local WebUI key, token, or fallback login exists. `/api/health` intentionally exposes only runner readiness for local monitoring. Local processes are trusted because they can reach the loopback listener and forge proxy headers.
 
 Do not expose this service directly to LAN or public internet. Multi-user job isolation is outside current security model.
 

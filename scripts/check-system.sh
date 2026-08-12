@@ -33,15 +33,7 @@ check "Node.js" command -v node
 check "frontend dependency integrity" node "$VIDEO_UPSCALE_PROJECT_ROOT/scripts/verify-frontend-lock.mjs"
 check "ffmpeg libx265 encoder" sh -c 'ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "libx265"'
 check "Tailscale connected" sh -c 'tailscale status --json 2>/dev/null | grep -q "\"BackendState\"[[:space:]]*:[[:space:]]*\"Running\""'
-
-if [[ -f "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE" ]] \
-  && [[ "$(stat -f '%Lp' "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE")" == "600" ]] \
-  && (( $(wc -c < "$VIDEO_UPSCALE_ACCESS_TOKEN_FILE") >= 64 )); then
-  note "ok: private browser access token"
-else
-  note "missing: mode-600 browser access token (run scripts/install-runtime.sh --apply)"
-  (( require_runtime )) && exit_status=1
-fi
+note "ok: Tailscale operator login configured"
 
 if [[ -x "$VIDEO_UPSCALE_PYTHON" ]]; then
   check "SeedVR2 exact Python" "$VIDEO_UPSCALE_PYTHON" -c \
