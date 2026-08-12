@@ -10,8 +10,8 @@ usage() {
   cat <<'EOF'
 usage: scripts/install-launchagents.sh [--dry-run|--apply]
 
-Installs per-user service and hourly cleanup LaunchAgents. No administrator
-password is needed. It replaces only these two exact labels.
+Installs per-user service LaunchAgent. Results persist until deleted from WebUI.
+No administrator password is needed. Existing legacy cleanup agent is removed.
 EOF
 }
 
@@ -32,6 +32,8 @@ require_command launchctl
 require_command plutil
 user_id="$(id -u)"
 launch_dir="$HOME/Library/LaunchAgents"
+legacy_cleanup_label="com.haohanl.video-upscale-webui.cleanup"
+legacy_cleanup_destination="$launch_dir/${legacy_cleanup_label}.plist"
 
 escape_sed_replacement() {
   print -r -- "$1" | sed 's/[&|]/\\&/g'
@@ -60,5 +62,16 @@ install_one() {
   note "installed $label"
 }
 
+if launchctl print "gui/${user_id}/${legacy_cleanup_label}" >/dev/null 2>&1 || [[ -f "$legacy_cleanup_destination" ]]; then
+  if (( apply )); then
+    if launchctl print "gui/${user_id}/${legacy_cleanup_label}" >/dev/null 2>&1; then
+      launchctl bootout "gui/${user_id}/${legacy_cleanup_label}"
+    fi
+    rm -f "$legacy_cleanup_destination"
+    note "removed legacy automatic cleanup agent"
+  else
+    note "DRY RUN: remove legacy automatic cleanup agent"
+  fi
+fi
+
 install_one "com.haohanl.video-upscale-webui" "$VIDEO_UPSCALE_PROJECT_ROOT/deploy/com.haohanl.video-upscale-webui.plist.template"
-install_one "com.haohanl.video-upscale-webui.cleanup" "$VIDEO_UPSCALE_PROJECT_ROOT/deploy/com.haohanl.video-upscale-webui.cleanup.plist.template"

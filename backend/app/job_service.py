@@ -36,11 +36,9 @@ class JobService:
         self.runner = runner
         self._free_space_bytes = free_space_bytes or (lambda path: disk_usage(path).free)
         self._worker_lock = threading.Lock()
-        self._prune_lock = threading.Lock()
         self._worker_active = False
         for interrupted_job in self.store.recover_interrupted():
             self._remove_partial_artifacts(interrupted_job)
-        self._prune_history()
         self._ensure_worker()
 
     async def create_job(self, upload: UploadFile, preset: str | None, color_correction: str) -> Job:
@@ -122,7 +120,7 @@ class JobService:
         return job
 
     def list_jobs(self) -> list[Job]:
-        return self.store.list(self.settings.max_retained_jobs)
+        return self.store.list()
 
     def has_queue_capacity(self) -> bool:
         return self.store.pending_count() < self.settings.max_pending_jobs
@@ -148,8 +146,6 @@ class JobService:
         job = self.store.cancel(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
-        if job.status == "cancelled":
-            self._prune_history()
         return job
 
     def delete(self, job_id: str) -> None:
@@ -210,20 +206,16 @@ class JobService:
             if not job.output_path.is_file():
                 raise RuntimeError("Runner did not produce an MP4 output")
             self.store.complete(job.id)
-            self._prune_history()
         except JobCancelled:
             self._remove_partial_artifacts(job)
             self.store.mark_cancelled(job.id)
-            self._prune_history()
         except Exception as error:
             if is_cancelled():
                 self._remove_partial_artifacts(job)
                 self.store.mark_cancelled(job.id)
-                self._prune_history()
             else:
                 self._remove_partial_artifacts(job)
                 self.store.fail(job.id, str(error))
-                self._prune_history()
 
     def _validate_media(
         self,
@@ -255,10 +247,3 @@ class JobService:
             for path in directory.glob(f"{job.id}*"):
                 if path.is_file():
                     path.unlink(missing_ok=True)
-
-    def _prune_history(self) -> None:
-        with self._prune_lock:
-            for job in self.store.prune_terminal(self.settings.max_retained_jobs):
-                job.input_path.unlink(missing_ok=True)
-                job.log_path.unlink(missing_ok=True)
-                self._remove_partial_artifacts(job)

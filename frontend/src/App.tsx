@@ -390,7 +390,7 @@ export default function App() {
             <div className="empty-state empty-state--result">
               <span>{icon("check")}</span>
               <h2>Results appear here</h2>
-              <p>Finished MP4 files stay available for 24 hours.</p>
+              <p>Finished MP4 files remain available until you delete them.</p>
             </div>
           )}
         </section>

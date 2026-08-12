@@ -50,11 +50,10 @@ launchctl print gui/$(id -u)/com.haohanl.video-upscale-webui
 tailscale serve status
 ```
 
-Main agent starts the backend in foreground so `launchd` restarts it. The backend invokes SeedVR2's official CLI from the isolated ComfyUI node; it does not keep a separate ComfyUI web server resident. Cleanup agent applies 24-hour media retention. Backend independently caps terminal database history and per-job log size. Run `scripts/start-local.sh --with-comfy` only for local ComfyUI maintenance. Stop an interactive instance with `scripts/stop-local.sh --dry-run`, then `--apply`. Stop a persistent instance with:
+Main agent starts the backend in foreground so `launchd` restarts it. The backend invokes SeedVR2's official CLI from the isolated ComfyUI node; it does not keep a separate ComfyUI web server resident. Jobs and finished MP4 files persist until the operator deletes them in WebUI; per-job log size remains capped. Run `scripts/start-local.sh --with-comfy` only for local ComfyUI maintenance. Stop an interactive instance with `scripts/stop-local.sh --dry-run`, then `--apply`. Stop a persistent instance with:
 
 ```zsh
 launchctl bootout gui/$(id -u)/com.haohanl.video-upscale-webui
-launchctl bootout gui/$(id -u)/com.haohanl.video-upscale-webui.cleanup
 ```
 
 ## Operational checks
@@ -63,7 +62,6 @@ launchctl bootout gui/$(id -u)/com.haohanl.video-upscale-webui.cleanup
 scripts/check-system.sh --require-runtime
 curl --fail --silent http://127.0.0.1:8000/api/health
 tailscale serve status
-scripts/cleanup-data.sh --dry-run --older-than-hours 24
 ```
 
 `check-system.sh` confirms arm64, exact trusted Python, `uv`, Node dependency integrity, `ffmpeg`, `ffprobe`, `libx265`, Tailscale connection, mode-600 access token, free-disk reserve, backend Python, SeedVR2 CLI, and PyTorch MPS. Automatic Python downloads are disabled. Upload time/size, decoded frame workload, processing output, and free-disk reserve are continuously bounded. `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.75` and `PYTORCH_MPS_LOW_WATERMARK_RATIO=0.60` are exported to every adapter/probe process; unlike upstream `0.0` defaults, they retain allocator limits.

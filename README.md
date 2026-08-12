@@ -8,7 +8,7 @@ Private, Mac-hosted SeedVR2 video-upscaling WebUI for Tailscale-connected device
 - Tailscale Serve provides private HTTPS; supplied scripts never enable Funnel.
 - Every UI and job route requires a generated HTTP Basic credential. Health stays unauthenticated for local monitoring.
 - State-changing routes also require a non-simple same-origin header to block browser CSRF.
-- Upload concurrency/time/size, queue depth, media duration/resolution/frame count, parser and processing time, output bytes, disk reserve, history count, and log size are bounded and configurable.
+- Upload concurrency/time/size, queue depth, media duration/resolution/frame count, parser and processing time, output bytes, disk reserve, and per-job log size are bounded and configurable. Job history and finished results persist until the operator deletes them.
 - Commands use argument arrays, server-generated media paths, allowlisted profiles, and pinned upstream source revisions.
 
 This is a single-operator service. Do not share its generated access token. Tailnet ACLs should permit only that operator's devices.

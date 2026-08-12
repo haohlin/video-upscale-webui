@@ -40,7 +40,6 @@ class Settings:
     max_source_frame_rate: int = 120
     max_source_frames: int = 216_000
     max_pending_jobs: int = 3
-    max_retained_jobs: int = 100
     max_process_seconds: int = 24 * 60 * 60
     max_job_log_bytes: int = 10 * 1024 * 1024
     max_job_artifact_bytes: int = 64 * 1024 * 1024 * 1024
@@ -119,7 +118,6 @@ class Settings:
                 os.environ.get("VIDEO_UPSCALE_MAX_SOURCE_FRAMES", "216000")
             ),
             max_pending_jobs=int(os.environ.get("VIDEO_UPSCALE_MAX_PENDING_JOBS", "3")),
-            max_retained_jobs=int(os.environ.get("VIDEO_UPSCALE_MAX_RETAINED_JOBS", "100")),
             max_process_seconds=int(
                 os.environ.get("VIDEO_UPSCALE_MAX_PROCESS_SECONDS", str(24 * 60 * 60))
             ),
@@ -159,7 +157,6 @@ class Settings:
             max_source_frame_rate=self.max_source_frame_rate,
             max_source_frames=self.max_source_frames,
             max_pending_jobs=self.max_pending_jobs,
-            max_retained_jobs=self.max_retained_jobs,
             max_process_seconds=self.max_process_seconds,
             max_job_log_bytes=self.max_job_log_bytes,
             max_job_artifact_bytes=self.max_job_artifact_bytes,

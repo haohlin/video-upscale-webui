@@ -32,6 +32,7 @@ PROFILE_PARAMETERS = {
 }
 MAX_TARGET_SHORT_SIDE = 4320
 MAX_PROBE_OUTPUT_BYTES = 64 * 1024
+MAX_OUTPUT_LINE_CHARS = 64 * 1024
 
 
 def required_environment(name: str) -> str:
@@ -107,8 +108,8 @@ def run_command(command: list[str]) -> None:
     previous_term = signal.signal(signal.SIGTERM, terminate_child)
     previous_int = signal.signal(signal.SIGINT, terminate_child)
     try:
-        while chunk := process.stdout.read(8 * 1024):
-            print(chunk, end="", flush=True)
+        while line := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
+            print(line, end="", flush=True)
         if process.wait() != 0:
             raise RuntimeError(f"SeedVR2 CLI exited with {process.returncode}")
     finally:

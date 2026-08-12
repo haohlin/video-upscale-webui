@@ -1,5 +1,8 @@
 import importlib.util
+import sys
+import threading
 from pathlib import Path
+from unittest.mock import patch
 
 
 def load_adapter():
@@ -9,6 +12,35 @@ def load_adapter():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_adapter_streams_short_output_before_child_exit():
+    """Waiting for an 8 KiB buffer must not hide SeedVR2's live output."""
+    adapter = load_adapter()
+    output_seen = threading.Event()
+    output_seen_early: list[bool] = []
+
+    def capture_print(*args, **_kwargs):
+        if args and "model-loading" in str(args[0]):
+            output_seen.set()
+
+    def observe() -> None:
+        output_seen_early.append(output_seen.wait(0.75))
+
+    with patch("builtins.print", side_effect=capture_print):
+        observer = threading.Thread(target=observe)
+        observer.start()
+        adapter.run_command(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('model-loading', flush=True); time.sleep(1.5)",
+            ]
+        )
+        observer.join(timeout=2)
+
+    assert not observer.is_alive()
+    assert output_seen_early == [True]
 
 
 def test_3b_safe_contract_uses_bounded_2x_seedvr2_parameters(tmp_path):

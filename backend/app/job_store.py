@@ -93,10 +93,10 @@ class JobStore:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return self._to_job(row) if row else None
 
-    def list(self, limit: int = 100) -> list[Job]:
+    def list(self) -> list[Job]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM jobs ORDER BY created_at DESC"
             ).fetchall()
         return [self._to_job(row) for row in rows]
 
@@ -106,21 +106,6 @@ class JobStore:
                 "SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'running', 'preflight')"
             ).fetchone()
         return int(row[0])
-
-    def prune_terminal(self, keep: int) -> list[Job]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM jobs
-                WHERE status IN ('completed', 'failed', 'cancelled')
-                ORDER BY updated_at DESC
-                LIMIT -1 OFFSET ?
-                """,
-                (max(keep, 0),),
-            ).fetchall()
-            if rows:
-                connection.executemany("DELETE FROM jobs WHERE id = ?", [(row["id"],) for row in rows])
-        return [self._to_job(row) for row in rows]
 
     def expired_terminal(self, cutoff: str) -> list[Job]:
         with self._connect() as connection:

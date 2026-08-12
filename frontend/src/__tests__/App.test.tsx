@@ -41,6 +41,7 @@ describe("App", () => {
     expect(screen.getByText("Choose from Photos")).toBeVisible();
     expect(screen.getByText("Experimental")).toBeVisible();
     expect(screen.queryByText("Real-ESRGAN Conservative")).not.toBeInTheDocument();
+    expect(screen.getByText("Finished MP4 files remain available until you delete them.")).toBeVisible();
   });
 
   it("submits selected video and current processing settings", async () => {

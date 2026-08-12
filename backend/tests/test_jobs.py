@@ -543,9 +543,9 @@ def test_runtime_media_layout_uses_inputs_staging_and_results(tmp_path):
     assert store.results == tmp_path / "results"
 
 
-def test_terminal_history_is_pruned_with_owned_files(tmp_path):
-    """Retaining unlimited rows and logs must make this test fail."""
-    client = make_client(tmp_path, max_retained_jobs=1)
+def test_completed_results_remain_until_manual_delete(tmp_path):
+    """Automatic history limits must never delete completed outputs."""
+    client = make_client(tmp_path)
     first = submit_video(client).json()["id"]
     wait_for_status(client, first, "completed")
     second = submit_video(client).json()["id"]
@@ -553,6 +553,6 @@ def test_terminal_history_is_pruned_with_owned_files(tmp_path):
 
     jobs = client.get("/api/jobs").json()["jobs"]
 
-    assert [job["id"] for job in jobs] == [second]
-    assert not (tmp_path / "logs" / f"{first}.log").exists()
-    assert not (tmp_path / "inputs" / f"{first}.mp4").exists()
+    assert [job["id"] for job in jobs] == [second, first]
+    assert (tmp_path / "inputs" / f"{first}.mp4").exists()
+    assert (tmp_path / "results" / f"{first}.mp4").exists()

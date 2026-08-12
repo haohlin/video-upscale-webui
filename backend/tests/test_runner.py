@@ -1,6 +1,7 @@
 import io
 import signal
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from unittest.mock import call, patch
@@ -10,6 +11,63 @@ import pytest
 from app.config import Settings
 from app.media import SubprocessMediaProbe
 from app.runner import JobCancelled, SubprocessRunner
+
+
+def test_runner_streams_short_progress_before_child_exit(tmp_path):
+    """Waiting for an 8 KiB buffer must not hide live progress from the UI."""
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("# adapter\n")
+    settings = Settings(
+        project_root=tmp_path,
+        runtime_root=tmp_path,
+        data_root=tmp_path,
+        seedvr2_cli=str(adapter),
+        seedvr2_model_dir=tmp_path,
+        python=sys.executable,
+        app_port=8765,
+        disk_reserve_gb=0,
+        default_profile="3b-safe",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+    )
+    (tmp_path / settings.seedvr2_3b_model).write_bytes(b"model")
+    (tmp_path / settings.seedvr2_vae_model).write_bytes(b"vae")
+    runner = SubprocessRunner(settings)
+    progress_seen = threading.Event()
+    cancel = threading.Event()
+    worker_error: list[BaseException] = []
+
+    def report_progress(percent: int, stage: str) -> None:
+        if (percent, stage) == (5, "loading"):
+            progress_seen.set()
+
+    def run() -> None:
+        try:
+            runner._run_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; print('PROGRESS 5 loading', flush=True); time.sleep(2)",
+                ],
+                None,
+                report_progress,
+                cancel.is_set,
+            )
+        except JobCancelled:
+            pass
+        except BaseException as error:
+            worker_error.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert progress_seen.wait(0.75)
+    finally:
+        cancel.set()
+        thread.join(timeout=4)
+
+    assert not thread.is_alive()
+    assert worker_error == []
 
 
 def test_runner_refuses_to_advertise_ready_before_default_model_is_present(tmp_path):

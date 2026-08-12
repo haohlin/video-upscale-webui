@@ -25,7 +25,6 @@ def create_app(
     free_space_bytes: Callable[[Path], int] | None = None,
     frontend_dist: Path | None = None,
     max_pending_jobs: int | None = None,
-    max_retained_jobs: int | None = None,
 ) -> FastAPI:
     settings = Settings.from_environment()
     if data_root:
@@ -34,8 +33,6 @@ def create_app(
         settings = settings.with_data_root(settings.data_root, max_upload_bytes)
     if max_pending_jobs is not None:
         settings = replace(settings, max_pending_jobs=max_pending_jobs)
-    if max_retained_jobs is not None:
-        settings = replace(settings, max_retained_jobs=max_retained_jobs)
     store = JobStore(settings.data_root)
     store.initialize()
     probe = media_probe or SubprocessMediaProbe(

@@ -30,3 +30,11 @@ def test_runtime_install_recreates_both_virtual_environments():
     script = (PROJECT_ROOT / "scripts/install-runtime.sh").read_text()
 
     assert script.count("uv venv --clear") == 2
+
+
+def test_launchagent_install_removes_legacy_automatic_cleanup_schedule():
+    """A stale cleanup plist must not reactivate after login or reboot."""
+    script = (PROJECT_ROOT / "scripts" / "install-launchagents.sh").read_text()
+
+    assert 'rm -f "$legacy_cleanup_destination"' in script
+    assert 'install_one "com.haohanl.video-upscale-webui.cleanup"' not in script

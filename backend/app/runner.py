@@ -17,7 +17,6 @@ from .domain import Job, PreflightLimits
 
 ProgressReporter = Callable[[int, str], None]
 CancellationChecker = Callable[[], bool]
-OUTPUT_CHUNK_CHARS = 8 * 1024
 OUTPUT_QUEUE_CHUNKS = 128
 MAX_OUTPUT_LINE_CHARS = 64 * 1024
 
@@ -229,7 +228,7 @@ class SubprocessRunner:
             assert process.stdout is not None
             try:
                 while not collector_shutdown.is_set():
-                    chunk = process.stdout.read(OUTPUT_CHUNK_CHARS)
+                    chunk = process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1)
                     if not chunk or not enqueue_output(chunk):
                         break
                 enqueue_output(None)
