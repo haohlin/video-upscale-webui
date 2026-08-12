@@ -1178,6 +1178,188 @@ def test_performance_samples_exclude_cancelled_failed_legacy_and_stale_jobs(tmp_
         assert connection.execute("SELECT COUNT(*) FROM performance_samples").fetchone()[0] == 0
 
 
+def test_phase_metrics_reject_completion_after_stale_reporting_gap(
+    tmp_path, monkeypatch
+):
+    """A late completion event must not rehabilitate stale phase timing."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "stale-phase-gap")
+    claimed_at = datetime(2026, 8, 12, 4, 30, tzinfo=UTC)
+    monkeypatch.setattr(store, "_now", lambda: claimed_at.isoformat())
+    assert store.claim_next_queued() is not None
+
+    stale_report_at = claimed_at + timedelta(seconds=400)
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=1,
+            work_sequence=1,
+            current_unit=10,
+            elapsed_seconds=10,
+        ),
+        now=stale_report_at,
+    )
+    samples = store.phase_samples(job.id)
+    assert len(samples) == 1
+    assert samples[0].valid is False
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=2,
+            work_sequence=2,
+            current_unit=10,
+            elapsed_seconds=10,
+        ),
+        now=stale_report_at + timedelta(seconds=1),
+    )
+    assert store.phase_samples(job.id)[0].valid is False
+
+    store.complete(
+        job.id,
+        publish_performance=True,
+        now=stale_report_at + timedelta(seconds=2),
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM performance_samples").fetchone()[0] == 0
+
+
+def test_phase_metrics_reject_completion_when_heartbeat_is_fresh_but_work_is_stale(
+    tmp_path, monkeypatch
+):
+    """Heartbeat liveness must not make an old measured-work rate publishable."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "stale-work-gap")
+    claimed_at = datetime(2026, 8, 12, 4, 35, tzinfo=UTC)
+    monkeypatch.setattr(store, "_now", lambda: claimed_at.isoformat())
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=1, elapsed_seconds=1),
+        now=claimed_at,
+    )
+    assert store.record_report(
+        job.id,
+        _heartbeat_report(sequence=2, work_sequence=1),
+        now=claimed_at + timedelta(seconds=250),
+    )
+
+    completed_at = claimed_at + timedelta(seconds=301)
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=3,
+            work_sequence=2,
+            current_unit=10,
+            elapsed_seconds=10,
+        ),
+        now=completed_at,
+    )
+    assert store.phase_samples(job.id)[0].valid is False
+    store.complete(
+        job.id,
+        publish_performance=True,
+        now=completed_at + timedelta(seconds=1),
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM performance_samples").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        ProgressReport(
+            percent=30,
+            stage="encoding",
+            invocation="full",
+            work_sequence=1,
+            measured_work=True,
+            event=ProgressEvent(
+                sequence=1,
+                work_sequence=1,
+                measured_work=False,
+                event_type="phase_progress",
+                phase="encoding",
+                current_unit=10,
+                total_units=10,
+                chunk_index=1,
+                chunk_count=1,
+                completed_unique_frames=0,
+                chunk_unique_frames=25,
+                chunk_context_frames=4,
+                total_unique_frames=25,
+                elapsed_seconds=10,
+            ),
+        ),
+        ProgressReport(
+            percent=30,
+            stage="encoding",
+            invocation="full",
+            work_sequence=1,
+            measured_work=False,
+            event=ProgressEvent(
+                sequence=1,
+                work_sequence=1,
+                measured_work=True,
+                event_type="phase_progress",
+                phase="encoding",
+                current_unit=10,
+                total_units=10,
+                chunk_index=1,
+                chunk_count=1,
+                completed_unique_frames=0,
+                chunk_unique_frames=25,
+                chunk_context_frames=4,
+                total_unique_frames=25,
+                elapsed_seconds=10,
+            ),
+        ),
+        ProgressReport(
+            percent=30,
+            stage="encoding",
+            invocation="full",
+            work_sequence=2,
+            measured_work=True,
+            event=ProgressEvent(
+                sequence=1,
+                work_sequence=1,
+                measured_work=True,
+                event_type="phase_progress",
+                phase="encoding",
+                current_unit=10,
+                total_units=10,
+                chunk_index=1,
+                chunk_count=1,
+                completed_unique_frames=0,
+                chunk_unique_frames=25,
+                chunk_context_frames=4,
+                total_unique_frames=25,
+                elapsed_seconds=10,
+            ),
+        ),
+    ],
+    ids=["event-unmeasured", "report-unmeasured", "work-sequence"],
+)
+def test_phase_metrics_reject_contradictory_report_event_metadata(tmp_path, report):
+    """Wrapper metadata disagreement must not mutate job or metric history."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "contradictory-report")
+    assert store.claim_next_queued() is not None
+
+    assert store.record_report(
+        job.id,
+        report,
+        now=datetime(2026, 8, 12, 4, 45, tzinfo=UTC),
+    ) is False
+    updated = store.get(job.id)
+    assert updated is not None
+    assert updated.last_heartbeat_at is None
+    assert updated.last_progress_at is None
+    assert store.phase_samples(job.id) == []
+
+
 def test_timing_migration_upgrades_version_one_and_fresh_version_two_is_stable(tmp_path):
     database_path = tmp_path / "jobs.sqlite3"
     tmp_path.mkdir(parents=True, exist_ok=True)

@@ -331,7 +331,8 @@ class JobStore:
         report: ProgressReport,
         now: datetime | None = None,
     ) -> bool:
-        timestamp = (now or datetime.now(UTC)).isoformat()
+        current = now or datetime.now(UTC)
+        timestamp = current.isoformat()
         invocation = report.invocation
         event = report.event
         if invocation not in {"preflight", "full"} or len(invocation) > 64:
@@ -339,6 +340,11 @@ class JobStore:
         if not self._valid_work_sequence(report.work_sequence):
             return False
         if event is not None and not self._valid_event(event):
+            return False
+        if event is not None and (
+            report.measured_work != event.measured_work
+            or report.work_sequence != event.work_sequence
+        ):
             return False
 
         with self._connect() as connection:
@@ -385,6 +391,16 @@ class JobStore:
                 report.measured_work
                 and work_sequence >= 0
                 and work_sequence > work_baseline
+            )
+            prior_heartbeat_fresh = self._fresh_at(
+                row["last_heartbeat_at"] or row["started_at"],
+                current,
+                HEARTBEAT_STALE_SECONDS,
+            )
+            prior_progress_fresh = self._fresh_at(
+                row["last_progress_at"] or row["started_at"],
+                current,
+                PROGRESS_STALE_SECONDS,
             )
             heartbeat = event is not None and event.event_type == "heartbeat"
             progress = int(row["progress"])
@@ -450,6 +466,8 @@ class JobStore:
                         and event.current_unit == event.total_units
                         and event.elapsed_seconds is not None
                         and event.elapsed_seconds > 0
+                        and prior_heartbeat_fresh
+                        and prior_progress_fresh
                     ),
                 )
             elif event is not None and event.event_type == "chunk_completed":
@@ -678,7 +696,7 @@ class JobStore:
                 event.chunk_context_frames,
                 event.total_unique_frames,
             )
-            if any(value is None for value in required):
+            if any(value is None for value in required) or not event.measured_work:
                 return False
         return True
 
@@ -748,7 +766,11 @@ class JobStore:
                 output_pixel_frames = excluded.output_pixel_frames,
                 elapsed_seconds = excluded.elapsed_seconds,
                 runtime_profile_fingerprint = excluded.runtime_profile_fingerprint,
-                valid_sample = MAX(job_phase_metrics.valid_sample, excluded.valid_sample)
+                valid_sample = CASE
+                    WHEN job_phase_metrics.finished_at IS NOT NULL
+                    THEN job_phase_metrics.valid_sample
+                    ELSE MAX(job_phase_metrics.valid_sample, excluded.valid_sample)
+                END
             """,
             (
                 row["id"],
