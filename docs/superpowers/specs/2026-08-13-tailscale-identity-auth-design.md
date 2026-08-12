@@ -25,4 +25,3 @@ Remove local HTTP Basic credentials and authorize the single operator through Ta
 - Focused tests cover missing, wrong, and correct Tailscale identity; health; mutation header; no Basic challenge; and removal of token generation/configuration.
 - The cross-repository release gate remains at or below 49 cases.
 - Deployment proves loopback binding, private Serve status, correct identity authorization through the tailnet URL, and one accepted short 1x job.
-

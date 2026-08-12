@@ -46,4 +46,3 @@
 - [ ] With no queued/preflight/running job, apply the updater and restart the exact LaunchAgent.
 - [ ] Verify loopback binding, private Serve/Funnel absence, tailnet identity access, and health.
 - [ ] Submit one short low-resolution 1x job and prove it reaches `queued`, `preflight`, `running`, or `completed`.
-
