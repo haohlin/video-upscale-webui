@@ -57,16 +57,13 @@ class SubprocessMediaProbe:
                     check=False,
                     timeout=self._timeout_seconds,
                 )
-                if isinstance(getattr(result, "stdout", None), str):
-                    stdout = result.stdout
-                else:
-                    size = output.tell()
-                    if size > MAX_PROBE_OUTPUT_BYTES:
-                        raise ValueError("ffprobe metadata exceeds safety limit")
-                    output.seek(0)
-                    stdout = output.read(MAX_PROBE_OUTPUT_BYTES + 1).decode(
-                        "utf-8", errors="strict"
-                    )
+                size = output.tell()
+                if size > MAX_PROBE_OUTPUT_BYTES:
+                    raise ValueError("ffprobe metadata exceeds safety limit")
+                output.seek(0)
+                stdout = output.read(MAX_PROBE_OUTPUT_BYTES + 1).decode(
+                    "utf-8", errors="strict"
+                )
         except subprocess.TimeoutExpired as error:
             raise ValueError("ffprobe timed out while validating uploaded video") from error
         if result.returncode != 0:

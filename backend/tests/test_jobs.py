@@ -181,6 +181,9 @@ def test_upload_defaults_to_original_resolution_and_exposes_target_dimensions(tm
 def test_upload_accepts_fixed_output_scale_allowlist(tmp_path, scale):
     class ScaleProbe:
         def inspect(self, path: Path) -> dict[str, float | int]:
+            if path.parent.name == "results":
+                width, height = target_dimensions(1920, 1080, float(scale))
+                return {"duration_seconds": 3.5, "width": width, "height": height}
             return {"duration_seconds": 3.5, "width": 1920, "height": 1080}
 
     client = make_client(tmp_path, probe=ScaleProbe())
@@ -383,6 +386,23 @@ def test_completed_job_downloads_mp4_and_delete_removes_media_and_record(tmp_pat
     assert client.get(f"/api/jobs/{job_id}").status_code == 404
     assert list((tmp_path / "inputs").glob("*")) == []
     assert list((tmp_path / "results").glob("*")) == []
+
+
+def test_output_mismatch_fails_job_before_completion(tmp_path):
+    """Completing a job with wrong final dimensions must make this test fail."""
+
+    class OutputMismatchProbe:
+        def inspect(self, path: Path) -> dict[str, float | int]:
+            if path.parent.name == "results":
+                return {"duration_seconds": 3.5, "width": 320, "height": 180}
+            return {"duration_seconds": 3.5, "width": 640, "height": 360}
+
+    client = make_client(tmp_path, probe=OutputMismatchProbe())
+    job_id = submit_video(client).json()["id"]
+
+    failed = wait_for_status(client, job_id, "failed")
+
+    assert failed["error"] == "Final MP4 dimensions do not match validated target"
 
 
 def test_queued_job_can_be_cancelled_without_running(tmp_path):
@@ -591,6 +611,33 @@ def test_legacy_database_migrates_existing_jobs_as_2x(tmp_path):
     assert recovered is not None
     assert recovered.status == "failed"
     assert recovered.stage == "interrupted"
+
+
+def test_job_progress_never_decreases_during_ffmpeg_fallback(tmp_path):
+    """A fallback progress restart must not move stored percent backward."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    input_path = store.inputs / "fallback.mp4"
+    input_path.write_bytes(b"input")
+    job = store.create(
+        job_id="fallback",
+        original_filename="fallback.mp4",
+        input_path=input_path,
+        output_path=store.results / "fallback.mp4",
+        log_path=store.logs / "fallback.log",
+        preset="3b-safe",
+        color_correction="lab",
+        media=MediaInfo(duration_seconds=1, width=320, height=180),
+    )
+    assert store.claim_next_queued() is not None
+    store.update_progress(job.id, 95, "audio-remux")
+
+    store.update_progress(job.id, 92, "audio-remux-retry")
+
+    updated = store.get(job.id)
+    assert updated is not None
+    assert updated.progress == 95
+    assert updated.stage == "audio-remux-retry"
 
 
 def test_restart_marks_interrupted_job_failed_and_resumes_queued_work(tmp_path):

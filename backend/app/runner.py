@@ -184,6 +184,10 @@ class SubprocessRunner:
             job.color_correction,
             "--mode",
             mode,
+            "--output-scale",
+            format(job.output_scale, "g"),
+            "--duration-seconds",
+            format(job.duration_seconds, ".6f"),
         ]
         command.extend(["--model-dir", str(self._settings.seedvr2_model_dir)])
         temporary_output = output_path.with_name(f"{output_path.stem}.video-only.mp4")

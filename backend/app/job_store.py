@@ -205,7 +205,7 @@ class JobStore:
     def update_progress(self, job_id: str, progress: int, stage: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE jobs SET progress = ?, stage = ?, updated_at = ? WHERE id = ? AND status IN ('running', 'preflight')",
+                "UPDATE jobs SET progress = MAX(progress, ?), stage = ?, updated_at = ? WHERE id = ? AND status IN ('running', 'preflight')",
                 (max(0, min(100, int(progress))), stage[:120], self._now(), job_id),
             )
 

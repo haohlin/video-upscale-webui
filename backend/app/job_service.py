@@ -236,6 +236,12 @@ class JobService:
                 raise JobCancelled()
             if not job.output_path.is_file():
                 raise RuntimeError("Runner did not produce an MP4 output")
+            output_media = normalize_media_info(self.media_probe.inspect(job.output_path))
+            if (
+                abs(output_media.width - job.target_width) > 2
+                or abs(output_media.height - job.target_height) > 2
+            ):
+                raise RuntimeError("Final MP4 dimensions do not match validated target")
             self.store.complete(job.id)
         except JobCancelled:
             self._remove_partial_artifacts(job)

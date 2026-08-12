@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -30,7 +31,6 @@ PROFILE_PARAMETERS = {
         "temporal_overlap": "4",
     },
 }
-MAX_TARGET_SHORT_SIDE = 4320
 MAX_PROBE_OUTPUT_BYTES = 64 * 1024
 MAX_OUTPUT_LINE_CHARS = 64 * 1024
 
@@ -44,6 +44,13 @@ def required_environment(name: str) -> str:
 
 def emit_progress(percent: int, stage: str) -> None:
     print(f"PROGRESS {percent} {stage}", flush=True)
+
+
+def positive_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return parsed
 
 
 def source_dimensions(path: Path, ffprobe: str) -> tuple[int, int]:
@@ -93,6 +100,12 @@ def parser() -> argparse.ArgumentParser:
     argument_parser.add_argument("--color-correction", required=True, choices=("lab", "none"))
     argument_parser.add_argument("--mode", required=True, choices=("preflight", "full"))
     argument_parser.add_argument("--model-dir", required=True, type=Path)
+    argument_parser.add_argument(
+        "--output-scale", required=True, type=float, choices=(0.25, 0.5, 1.0, 2.0)
+    )
+    argument_parser.add_argument(
+        "--duration-seconds", required=True, type=positive_finite_float
+    )
     return argument_parser
 
 
@@ -164,15 +177,55 @@ def final_mp4_command(
         audio_codec,
         "-movflags",
         "+faststart",
+        "-progress",
+        "pipe:1",
         str(output),
     ]
 
 
-def remux_audio(video: Path, source: Path, output: Path, ffmpeg: str) -> None:
+def run_ffmpeg_with_progress(command: list[str], duration_seconds: float) -> None:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    last_percent = 92
+    emit_progress(last_percent, "audio-remux")
+    while line := process.stdout.readline(MAX_OUTPUT_LINE_CHARS + 1):
+        bounded = line[:MAX_OUTPUT_LINE_CHARS].strip()
+        if bounded.startswith("out_time_us="):
+            try:
+                seconds = max(0.0, int(bounded.split("=", 1)[1]) / 1_000_000)
+            except ValueError:
+                continue
+            percent = min(
+                99,
+                92 + int(7 * min(1.0, seconds / duration_seconds)),
+            )
+            if percent > last_percent:
+                last_percent = percent
+                emit_progress(percent, "audio-remux")
+        elif bounded == "progress=end" and last_percent < 99:
+            last_percent = 99
+            emit_progress(99, "audio-remux")
+    if process.wait() != 0:
+        raise subprocess.CalledProcessError(process.returncode, command)
+
+
+def remux_audio(
+    video: Path,
+    source: Path,
+    output: Path,
+    ffmpeg: str,
+    duration_seconds: float,
+) -> None:
     """Keep MP4-compatible source audio; use AAC only when copy cannot mux."""
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(
+        run_ffmpeg_with_progress(
             final_mp4_command(
                 video=video,
                 source=source,
@@ -180,11 +233,11 @@ def remux_audio(video: Path, source: Path, output: Path, ffmpeg: str) -> None:
                 ffmpeg=ffmpeg,
                 audio_codec="copy",
             ),
-            check=True,
+            duration_seconds,
         )
     except subprocess.CalledProcessError:
         output.unlink(missing_ok=True)
-        subprocess.run(
+        run_ffmpeg_with_progress(
             final_mp4_command(
                 video=video,
                 source=source,
@@ -192,8 +245,23 @@ def remux_audio(video: Path, source: Path, output: Path, ffmpeg: str) -> None:
                 ffmpeg=ffmpeg,
                 audio_codec="aac",
             ),
-            check=True,
+            duration_seconds,
         )
+
+
+def target_short_side(
+    source_width: int, source_height: int, output_scale: float
+) -> int:
+    target_width = max(2, int(source_width * output_scale / 2 + 0.5) * 2)
+    target_height = max(2, int(source_height * output_scale / 2 + 0.5) * 2)
+    shortest = min(target_width, target_height)
+    if shortest < 256:
+        raise ValueError("Target shortest edge must be at least 256 pixels")
+    if max(target_width, target_height) > 7680:
+        raise ValueError("Target longest edge must not exceed 7680 pixels")
+    if target_width * target_height > 33_177_600:
+        raise ValueError("Target pixel count must not exceed 33177600 pixels")
+    return shortest
 
 
 def build_seedvr2_command(
@@ -206,13 +274,12 @@ def build_seedvr2_command(
     color_correction: str,
     source_width: int,
     source_height: int,
+    output_scale: float,
     python: str,
     official_cli: Path,
 ) -> list[str]:
     parameters = PROFILE_PARAMETERS[preset]
-    target_short_side = min(source_width, source_height) * 2
-    if target_short_side > MAX_TARGET_SHORT_SIDE:
-        raise ValueError("Target resolution exceeds safety limit")
+    resolution = target_short_side(source_width, source_height, output_scale)
     return [
         python,
         str(official_cli),
@@ -229,7 +296,7 @@ def build_seedvr2_command(
         "--dit_model",
         model_name,
         "--resolution",
-        str(target_short_side),
+        str(resolution),
         "--batch_size",
         parameters["batch_size"],
         "--uniform_batch_size",
@@ -268,6 +335,7 @@ def main() -> int:
         color_correction=args.color_correction,
         source_width=width,
         source_height=height,
+        output_scale=args.output_scale,
         python=sys.executable,
         official_cli=official_cli,
     )
@@ -276,13 +344,17 @@ def main() -> int:
         run_command(command)
         if not temporary_output.is_file():
             raise RuntimeError("SeedVR2 did not create a video output")
-        emit_progress(92, "audio-remux")
-        remux_audio(temporary_output, args.input, args.output, ffmpeg)
+        remux_audio(
+            temporary_output,
+            args.input,
+            args.output,
+            ffmpeg,
+            args.duration_seconds,
+        )
         if not args.output.is_file():
             raise RuntimeError("FFmpeg did not create final MP4")
     finally:
         temporary_output.unlink(missing_ok=True)
-    emit_progress(100, "complete")
     return 0
 
 

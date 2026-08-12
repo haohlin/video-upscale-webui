@@ -4,12 +4,14 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 import pytest
 
 from app.config import Settings
-from app.media import SubprocessMediaProbe
+from app.domain import Job
+from app.media import MAX_PROBE_OUTPUT_BYTES, SubprocessMediaProbe
 from app.runner import JobCancelled, SubprocessRunner
 
 
@@ -159,14 +161,29 @@ def test_ffprobe_timeout_rejects_pathological_media(tmp_path):
     assert run.call_args.kwargs["timeout"] == 7
 
 
+def test_final_output_ffprobe_metadata_is_bounded(tmp_path):
+    """Final validation must not allow unbounded ffprobe output."""
+    probe = SubprocessMediaProbe("ffprobe")
+
+    def oversized_probe(_command, *, stdout, **_kwargs):
+        stdout.write(b"x" * (MAX_PROBE_OUTPUT_BYTES + 1))
+        return SimpleNamespace(returncode=0)
+
+    with patch("app.media.subprocess.run", side_effect=oversized_probe):
+        with pytest.raises(ValueError, match="ffprobe metadata exceeds safety limit"):
+            probe.inspect(tmp_path / "result.mp4")
+
+
 def test_ffprobe_returns_bounded_frame_metadata(tmp_path):
     """Admission must receive frame rate and count, not duration alone."""
     probe = SubprocessMediaProbe("ffprobe")
     payload = '{"streams":[{"width":640,"height":360,"avg_frame_rate":"60000/1001","r_frame_rate":"60/1","nb_read_frames":"1800"}],"format":{"duration":"30","format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}'
 
-    with patch("app.media.subprocess.run") as run:
-        run.return_value.returncode = 0
-        run.return_value.stdout = payload
+    def write_payload(_command, *, stdout, **_kwargs):
+        stdout.write(payload.encode())
+        return SimpleNamespace(returncode=0)
+
+    with patch("app.media.subprocess.run", side_effect=write_payload) as run:
         media = probe.inspect(tmp_path / "video.mp4")
 
     assert media.frame_rate == pytest.approx(59.94, rel=1e-3)
@@ -181,11 +198,75 @@ def test_ffprobe_rejects_indirect_network_media_format(tmp_path):
     probe = SubprocessMediaProbe("ffprobe")
     payload = '{"streams":[{"width":640,"height":360,"avg_frame_rate":"30/1","r_frame_rate":"30/1","nb_read_frames":"30"}],"format":{"duration":"1","format_name":"hls"}}'
 
-    with patch("app.media.subprocess.run") as run:
-        run.return_value.returncode = 0
-        run.return_value.stdout = payload
+    def write_payload(_command, *, stdout, **_kwargs):
+        stdout.write(payload.encode())
+        return SimpleNamespace(returncode=0)
+
+    with patch("app.media.subprocess.run", side_effect=write_payload):
         with pytest.raises(ValueError, match="self-contained"):
             probe.inspect(tmp_path / "manifest.mp4")
+
+
+def test_runner_passes_selected_output_scale_to_adapter(tmp_path):
+    """Dropping selected scale from adapter argv must make this test fail."""
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("# adapter\n")
+    settings = Settings(
+        project_root=tmp_path,
+        runtime_root=tmp_path,
+        data_root=tmp_path,
+        seedvr2_cli=str(adapter),
+        seedvr2_model_dir=tmp_path,
+        python="python3",
+        app_port=8765,
+        disk_reserve_gb=0,
+        default_profile="3b-safe",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+    )
+    (tmp_path / settings.seedvr2_3b_model).write_bytes(b"model")
+    (tmp_path / settings.seedvr2_vae_model).write_bytes(b"vae")
+    runner = SubprocessRunner(settings)
+    job = Job(
+        id="scale-job",
+        original_filename="input.mp4",
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "output.mp4",
+        log_path=tmp_path / "job.log",
+        preset="3b-safe",
+        color_correction="lab",
+        output_scale=0.5,
+        target_width=640,
+        target_height=360,
+        frame_count=105,
+        runtime_profile_fingerprint="test",
+        status="running",
+        progress=0,
+        stage="upscaling",
+        created_at="2026-08-12T00:00:00+00:00",
+        updated_at="2026-08-12T00:00:00+00:00",
+        output_filename=None,
+        error=None,
+        requires_preflight=False,
+        cancel_requested=False,
+        duration_seconds=3.5,
+        width=1280,
+        height=720,
+    )
+
+    with patch.object(runner, "_run_process") as run_process:
+        runner._execute(
+            job,
+            input_path=job.input_path,
+            output_path=job.output_path,
+            mode="full",
+            report_progress=lambda _percent, _stage: None,
+            is_cancelled=lambda: False,
+        )
+
+    command = run_process.call_args.args[0]
+    assert command[command.index("--output-scale") + 1] == "0.5"
+    assert command[command.index("--duration-seconds") + 1] == "3.500000"
 
 
 def test_runner_wait_uses_configured_processing_deadline(tmp_path):
