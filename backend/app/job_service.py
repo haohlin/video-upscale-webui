@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from shutil import disk_usage
 from typing import Callable
@@ -153,6 +154,45 @@ class JobService:
     def list_jobs(self) -> list[Job]:
         return self.store.list()
 
+    def public_job(self, job: Job, *, now: datetime | None = None) -> dict[str, object]:
+        current = now or datetime.now(UTC)
+        payload = job.public_dict()
+        started = datetime.fromisoformat(job.started_at) if job.started_at else None
+        finished = datetime.fromisoformat(job.finished_at) if job.finished_at else current
+        payload["elapsed_seconds"] = (
+            max(0, int((finished - started).total_seconds())) if started else None
+        )
+        heartbeat = (
+            datetime.fromisoformat(job.last_heartbeat_at)
+            if job.last_heartbeat_at
+            else None
+        )
+        progress = (
+            datetime.fromisoformat(job.last_progress_at)
+            if job.last_progress_at
+            else None
+        )
+        active = job.status in {"running", "preflight"}
+        heartbeat_basis = heartbeat or started
+        progress_basis = progress or started
+        payload["heartbeat_stale"] = bool(
+            active
+            and heartbeat_basis
+            and (current - heartbeat_basis).total_seconds()
+            > self.settings.heartbeat_stale_seconds
+        )
+        payload["progress_stale"] = bool(
+            active
+            and progress_basis
+            and (current - progress_basis).total_seconds()
+            > self.settings.progress_stale_seconds
+        )
+        if payload["heartbeat_stale"] or payload["progress_stale"]:
+            payload["eta_low_seconds"] = None
+            payload["eta_high_seconds"] = None
+            payload["eta_confidence"] = "none"
+        return payload
+
     def has_queue_capacity(self) -> bool:
         return self.store.pending_count() < self.settings.max_pending_jobs
 
@@ -219,9 +259,7 @@ class JobService:
                 return
 
     def _run_job(self, job: Job) -> None:
-        report_progress = lambda report: self.store.update_progress(
-            job.id, report.percent, report.stage
-        )
+        report_progress = lambda report: self.store.record_report(job.id, report)
         is_cancelled = lambda: self.store.cancellation_requested(job.id)
         try:
             if not self.has_disk_reserve():
@@ -244,7 +282,18 @@ class JobService:
                 or abs(output_media.height - job.target_height) > 2
             ):
                 raise RuntimeError("Final MP4 dimensions do not match validated target")
-            self.store.complete(job.id)
+            current = self.store.get(job.id)
+            publish_performance = False
+            if (
+                current is not None
+                and current.runtime_profile_fingerprint != "legacy:unknown"
+                and current.progress_source == "measured"
+            ):
+                freshness = self.public_job(current)
+                publish_performance = not bool(
+                    freshness["heartbeat_stale"] or freshness["progress_stale"]
+                )
+            self.store.complete(job.id, publish_performance=publish_performance)
         except JobCancelled:
             self._remove_partial_artifacts(job)
             self.store.mark_cancelled(job.id)

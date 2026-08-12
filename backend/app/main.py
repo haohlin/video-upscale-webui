@@ -158,7 +158,7 @@ def create_app(
 
     @service.get("/api/jobs")
     def list_jobs() -> dict[str, list[dict[str, object]]]:
-        return {"jobs": [job.public_dict() for job in jobs.list_jobs()]}
+        return {"jobs": [jobs.public_job(job) for job in jobs.list_jobs()]}
 
     @service.post("/api/jobs", status_code=201)
     async def create_job(
@@ -167,13 +167,13 @@ def create_app(
         color_correction: str = Form("lab"),
         output_scale: float | None = Form(None),
     ) -> dict[str, object]:
-        return (
+        return jobs.public_job(
             await jobs.create_job(video, preset, color_correction, output_scale)
-        ).public_dict()
+        )
 
     @service.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
-        return jobs.get_job(job_id).public_dict()
+        return jobs.public_job(jobs.get_job(job_id))
 
     @service.get("/api/jobs/{job_id}/log")
     def get_job_log(job_id: str, offset: int = Query(0, ge=0)) -> JSONResponse:
@@ -184,7 +184,7 @@ def create_app(
 
     @service.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str) -> dict[str, object]:
-        return jobs.cancel(job_id).public_dict()
+        return jobs.public_job(jobs.cancel(job_id))
 
     @service.delete("/api/jobs/{job_id}", status_code=204)
     def delete_job(job_id: str) -> Response:

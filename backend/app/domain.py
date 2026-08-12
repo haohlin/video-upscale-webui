@@ -75,6 +75,22 @@ class Job:
     duration_seconds: float
     width: int
     height: int
+    started_at: str | None = None
+    finished_at: str | None = None
+    last_heartbeat_at: str | None = None
+    last_progress_at: str | None = None
+    progress_source: str = "none"
+    phase_name: str | None = None
+    phase_current: int | None = None
+    phase_total: int | None = None
+    chunk_current: int | None = None
+    chunk_total: int | None = None
+    eta_low_seconds: int | None = None
+    eta_high_seconds: int | None = None
+    eta_confidence: str = "none"
+    last_event_invocation: str | None = None
+    last_event_sequence: int = -1
+    last_work_sequence: int = -1
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -92,7 +108,31 @@ class Job:
             "stage": self.stage,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "last_heartbeat_at": self.last_heartbeat_at,
+            "last_progress_at": self.last_progress_at,
+            "progress_source": self.progress_source,
+            "phase_name": self.phase_name,
+            "phase_current": self.phase_current,
+            "phase_total": self.phase_total,
+            "chunk_current": self.chunk_current,
+            "chunk_total": self.chunk_total,
+            "eta_low_seconds": self.eta_low_seconds,
+            "eta_high_seconds": self.eta_high_seconds,
+            "eta_confidence": self.eta_confidence,
             "output_filename": self.output_filename,
             "error": self.error,
             "requires_preflight": self.requires_preflight,
         }
+
+
+@dataclass(frozen=True)
+class PhaseSample:
+    sample_group: str
+    phase: str
+    elapsed_seconds: float
+    completed_units: int
+    runtime_profile_fingerprint: str
+    workload_bucket: int
+    valid: bool

@@ -2,6 +2,7 @@ import base64
 import sqlite3
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from app.domain import MediaInfo, target_dimensions
 from app.job_service import JobService
 from app.job_store import JobStore
 from app.main import create_app
-from app.progress import ProgressReport
+from app.progress import ProgressEvent, ProgressReport
 
 
 class ValidProbe:
@@ -536,7 +537,7 @@ def test_config_exposes_output_scale_options_and_default(tmp_path):
     ]
 
 
-def test_legacy_database_migrates_existing_jobs_as_2x(tmp_path):
+def test_timing_migration_upgrades_legacy_database_and_is_idempotent(tmp_path):
     database_path = tmp_path / "jobs.sqlite3"
     tmp_path.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(database_path) as connection:
@@ -608,7 +609,7 @@ def test_legacy_database_migrates_existing_jobs_as_2x(tmp_path):
     assert job.frame_count == 0
     assert job.runtime_profile_fingerprint == "legacy:unknown"
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert connection.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()[0] == schema_after_first
         assert connection.execute(
             "SELECT id, output_scale, target_width, target_height, frame_count, runtime_profile_fingerprint FROM jobs ORDER BY id"
@@ -673,7 +674,7 @@ def test_active_job_progress_is_capped_below_validated_completion(tmp_path):
     assert active is not None
     assert active.status == "running"
     assert active.progress == 99
-    store.complete(job.id)
+    store.complete(job.id, publish_performance=False)
     completed = store.get(job.id)
     assert completed is not None
     assert completed.status == "completed"
@@ -875,3 +876,409 @@ def test_completed_results_remain_until_manual_delete(tmp_path):
     assert [job["id"] for job in jobs] == [second, first]
     assert (tmp_path / "inputs" / f"{first}.mp4").exists()
     assert (tmp_path / "results" / f"{first}.mp4").exists()
+
+
+def _create_timing_test_job(
+    store: JobStore,
+    job_id: str,
+    *,
+    fingerprint: str = "seedvr2:3b-safe:apple-mps:scale=1",
+):
+    input_path = store.inputs / f"{job_id}.mp4"
+    input_path.write_bytes(b"input")
+    return store.create(
+        job_id=job_id,
+        original_filename=f"private-{job_id}-1920x1080.mp4",
+        input_path=input_path,
+        output_path=store.results / f"{job_id}.mp4",
+        log_path=store.logs / f"{job_id}.log",
+        preset="3b-safe",
+        color_correction="lab",
+        media=MediaInfo(
+            duration_seconds=4,
+            width=640,
+            height=360,
+            frame_count=100,
+        ),
+        output_scale=1.0,
+        target_width=640,
+        target_height=360,
+        runtime_profile_fingerprint=fingerprint,
+    )
+
+
+def _phase_report(
+    *,
+    sequence: int,
+    work_sequence: int,
+    current_unit: int,
+    total_units: int = 10,
+    invocation: str = "full",
+    elapsed_seconds: float = 5.0,
+    phase: str = "encoding",
+) -> ProgressReport:
+    event = ProgressEvent(
+        sequence=sequence,
+        work_sequence=work_sequence,
+        measured_work=True,
+        event_type="phase_progress",
+        phase=phase,
+        current_unit=current_unit,
+        total_units=total_units,
+        chunk_index=1,
+        chunk_count=4,
+        completed_unique_frames=0,
+        chunk_unique_frames=25,
+        chunk_context_frames=4,
+        total_unique_frames=100,
+        elapsed_seconds=elapsed_seconds,
+    )
+    return ProgressReport(
+        percent=20 + current_unit,
+        stage=phase,
+        invocation=invocation,
+        work_sequence=work_sequence,
+        measured_work=True,
+        event=event,
+    )
+
+
+def _heartbeat_report(*, sequence: int, work_sequence: int, invocation: str = "full"):
+    event = ProgressEvent(
+        sequence=sequence,
+        work_sequence=work_sequence,
+        measured_work=False,
+        event_type="heartbeat",
+    )
+    return ProgressReport(
+        percent=0,
+        stage="heartbeat",
+        invocation=invocation,
+        work_sequence=work_sequence,
+        measured_work=False,
+        event=event,
+    )
+
+
+def test_timing_and_monotonic_report_freshness_are_persisted(tmp_path, monkeypatch):
+    """Regressed event order or heartbeat-only traffic must not fake work freshness."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "timing-monotonic")
+    claimed_at = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    t1 = claimed_at + timedelta(seconds=10)
+    t2 = claimed_at + timedelta(seconds=20)
+    monkeypatch.setattr(store, "_now", lambda: claimed_at.isoformat())
+
+    running = store.claim_next_queued()
+
+    assert running is not None
+    assert running.started_at == claimed_at.isoformat()
+    assert running.finished_at is None
+    sequence_7 = _phase_report(sequence=7, work_sequence=5, current_unit=5)
+    assert store.record_report(job.id, sequence_7, now=t1) is True
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=6, work_sequence=6, current_unit=6),
+        now=t2,
+    ) is False
+    updated = store.get(job.id)
+    assert updated is not None
+    assert updated.phase_name == "encoding"
+    assert updated.phase_current == 5
+    assert updated.phase_total == 10
+    assert updated.chunk_current == 1
+    assert updated.chunk_total == 4
+    assert updated.last_heartbeat_at == t1.isoformat()
+    assert updated.last_progress_at == t1.isoformat()
+    assert updated.last_event_invocation == "full"
+    assert updated.last_event_sequence == 7
+    assert updated.last_work_sequence == 5
+
+    assert store.record_report(job.id, _heartbeat_report(sequence=8, work_sequence=5), now=t2)
+    heartbeat = store.get(job.id)
+    assert heartbeat is not None
+    assert heartbeat.last_heartbeat_at == t2.isoformat()
+    assert heartbeat.last_progress_at == t1.isoformat()
+    assert heartbeat.progress == updated.progress
+
+    duplicate_time = t2 + timedelta(seconds=1)
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=9, work_sequence=5, current_unit=5),
+        now=duplicate_time,
+    )
+    duplicate = store.get(job.id)
+    assert duplicate is not None
+    assert duplicate.last_heartbeat_at == duplicate_time.isoformat()
+    assert duplicate.last_progress_at == t1.isoformat()
+
+    store.complete(job.id, publish_performance=False, now=t2)
+    completed = store.get(job.id)
+    assert completed is not None
+    assert completed.finished_at == t2.isoformat()
+
+
+def test_invocation_sequence_resets_between_preflight_and_full(tmp_path):
+    """Preflight sequence numbers must not reject fresh full-run reports."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "invocation-reset")
+    assert store.claim_next_queued() is not None
+    store.mark_preflight(job.id)
+    now = datetime(2026, 8, 12, 2, 0, tzinfo=UTC)
+
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=7,
+            work_sequence=5,
+            current_unit=5,
+            invocation="preflight",
+        ),
+        now=now,
+    )
+    store.mark_running(job.id)
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=1),
+        now=now + timedelta(seconds=1),
+    )
+    updated = store.get(job.id)
+    assert updated is not None
+    assert updated.last_event_invocation == "full"
+    assert updated.last_event_sequence == 1
+    assert updated.last_work_sequence == 1
+    assert updated.phase_current == 1
+
+
+def test_phase_metrics_publish_anonymized_performance_samples_and_cascade(tmp_path):
+    """Deleting job history must remove owned metrics without erasing anonymous rates."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    job = _create_timing_test_job(store, "secret-job-name")
+    assert store.claim_next_queued() is not None
+    started = datetime(2026, 8, 12, 3, 0, tzinfo=UTC)
+    finished = started + timedelta(seconds=10)
+
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=7, work_sequence=5, current_unit=1, elapsed_seconds=1),
+        now=started,
+    )
+    assert store.record_report(
+        job.id,
+        _phase_report(
+            sequence=8,
+            work_sequence=6,
+            current_unit=10,
+            elapsed_seconds=10,
+        ),
+        now=finished,
+    )
+    samples = store.phase_samples(job.id)
+    assert len(samples) == 1
+    assert samples[0].phase == "encoding"
+    assert samples[0].elapsed_seconds == 10
+    assert samples[0].completed_units == 10
+    assert samples[0].valid is True
+
+    store.complete(
+        job.id,
+        publish_performance=True,
+        now=finished + timedelta(seconds=1),
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(performance_samples)")
+        }
+        rows = connection.execute(
+            "SELECT sample_group, phase, seconds_per_unit, workload_bucket, "
+            "runtime_profile_fingerprint, sample_date FROM performance_samples"
+        ).fetchall()
+        metric_count = connection.execute(
+            "SELECT COUNT(*) FROM job_phase_metrics WHERE job_id = ?", (job.id,)
+        ).fetchone()[0]
+    assert columns == {
+        "id",
+        "sample_group",
+        "phase",
+        "seconds_per_unit",
+        "workload_bucket",
+        "runtime_profile_fingerprint",
+        "sample_date",
+    }
+    assert metric_count == 1
+    assert len(rows) == 1
+    sample_group, phase, rate, bucket, fingerprint, sample_date = rows[0]
+    assert len(sample_group) == 32
+    assert phase == "encoding"
+    assert rate == 1.0
+    assert bucket == 22
+    assert fingerprint == job.runtime_profile_fingerprint
+    assert sample_date == "2026-08-12"
+    assert job.id not in repr(rows)
+    assert job.original_filename not in repr(rows)
+    assert str(job.input_path) not in repr(rows)
+
+    assert store.delete(job.id)
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM job_phase_metrics").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM performance_samples").fetchone()[0] == 1
+
+
+def test_performance_samples_exclude_cancelled_failed_legacy_and_stale_jobs(tmp_path):
+    """Invalid, private, or stale jobs must never train historical ETA."""
+    store = JobStore(tmp_path)
+    store.initialize()
+    now = datetime(2026, 8, 12, 4, 0, tzinfo=UTC)
+
+    cancelled = _create_timing_test_job(store, "cancelled-sample")
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        cancelled.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=10, elapsed_seconds=10),
+        now=now,
+    )
+    store.mark_cancelled(cancelled.id)
+
+    failed = _create_timing_test_job(store, "failed-sample")
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        failed.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=10, elapsed_seconds=10),
+        now=now,
+    )
+    store.fail(failed.id, "failed")
+
+    legacy = _create_timing_test_job(
+        store,
+        "legacy-sample",
+        fingerprint="legacy:unknown",
+    )
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        legacy.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=10, elapsed_seconds=10),
+        now=now,
+    )
+    store.complete(legacy.id, publish_performance=True, now=now + timedelta(seconds=1))
+
+    stale = _create_timing_test_job(store, "stale-sample")
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        stale.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=10, elapsed_seconds=10),
+        now=now,
+    )
+    store.complete(stale.id, publish_performance=True, now=now + timedelta(seconds=121))
+
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM performance_samples").fetchone()[0] == 0
+
+
+def test_timing_migration_upgrades_version_one_and_fresh_version_two_is_stable(tmp_path):
+    database_path = tmp_path / "jobs.sqlite3"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                original_filename TEXT NOT NULL,
+                input_path TEXT NOT NULL,
+                output_path TEXT NOT NULL,
+                log_path TEXT NOT NULL,
+                preset TEXT NOT NULL,
+                color_correction TEXT NOT NULL,
+                output_scale REAL NOT NULL,
+                target_width INTEGER NOT NULL,
+                target_height INTEGER NOT NULL,
+                frame_count INTEGER NOT NULL,
+                runtime_profile_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                output_filename TEXT,
+                error TEXT,
+                requires_preflight INTEGER NOT NULL,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                duration_seconds REAL NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL
+            );
+            PRAGMA user_version = 1;
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs VALUES (
+                'version-one', 'private.mp4', '/private/input.mp4', '/private/output.mp4',
+                '/private/log', '3b-safe', 'lab', 1.0, 640, 360, 100,
+                'seedvr2:3b-safe', 'queued', 0, 'queued',
+                '2026-08-12T00:00:00+00:00', '2026-08-12T00:00:00+00:00',
+                NULL, NULL, 0, 0, 4.0, 640, 360
+            )
+            """
+        )
+
+    store = JobStore(tmp_path)
+    store.initialize()
+    migrated = store.get("version-one")
+    assert migrated is not None
+    assert migrated.started_at is None
+    assert migrated.finished_at is None
+    assert migrated.last_heartbeat_at is None
+    assert migrated.last_progress_at is None
+    assert migrated.progress_source == "none"
+    assert migrated.eta_confidence == "none"
+    assert migrated.last_event_invocation is None
+    assert migrated.last_event_sequence == -1
+    assert migrated.last_work_sequence == -1
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        schema_before = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ).fetchall()
+    store.initialize()
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ).fetchall() == schema_before
+
+
+def test_timing_public_job_separates_heartbeat_and_work_staleness(tmp_path):
+    """Fresh heartbeats must show alive-but-not-advancing instead of healthy work."""
+    settings = Settings.from_environment().with_data_root(tmp_path, None)
+    store = JobStore(tmp_path)
+    store.initialize()
+    service = JobService(settings, store, ValidProbe(), CompletedRunner())
+    job = _create_timing_test_job(store, "public-timing")
+    queued_at = datetime(2026, 8, 12, 5, 0, tzinfo=UTC)
+    assert service.public_job(job, now=queued_at)["elapsed_seconds"] is None
+    store._now = lambda: queued_at.isoformat()
+    assert store.claim_next_queued() is not None
+    assert store.record_report(
+        job.id,
+        _phase_report(sequence=1, work_sequence=1, current_unit=1, elapsed_seconds=1),
+        now=queued_at,
+    )
+    assert store.record_report(
+        job.id,
+        _heartbeat_report(sequence=2, work_sequence=1),
+        now=queued_at + timedelta(seconds=250),
+    )
+
+    payload = service.public_job(
+        store.get(job.id),
+        now=queued_at + timedelta(seconds=301),
+    )
+    assert payload["elapsed_seconds"] == 301
+    assert payload["heartbeat_stale"] is False
+    assert payload["progress_stale"] is True
+    assert payload["eta_low_seconds"] is None
+    assert payload["eta_high_seconds"] is None
+    assert payload["eta_confidence"] == "none"
