@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { ApiError, cancelJob, createJob, deleteJob, downloadUrl, getConfig, getHealth, getJobLog, getJobs } from "./api";
-import { presetIds, type ColorCorrection, type Job, type JobStatus, type PresetId, type UploadProgress } from "./types";
+import { outputScales, presetIds, type ColorCorrection, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type UploadProgress } from "./types";
 
 const pollMs = 2_000;
 const acceptedVideoTypes = "video/*,.mp4,.mov,.mkv,.avi,.webm";
@@ -28,6 +28,13 @@ const presets: Array<{
 ];
 
 const activeStatuses: JobStatus[] = ["queued", "preflight", "running"];
+
+const fallbackScaleOptions: RuntimeConfig["output_scales"] = [
+  { value: 1, label: "1x Original", description: "Original dimensions; full generative restoration." },
+  { value: 0.5, label: "0.5x Balanced", description: "Half width and height; generative restoration with fewer output pixels." },
+  { value: 0.25, label: "0.25x Fast", description: "Quarter width and height; experimental generative restoration." },
+  { value: 2, label: "2x Upscale", description: "Double width and height; highest processing cost." },
+];
 
 type UploadState = UploadProgress & {
   phase: "uploading" | "validating";
@@ -57,6 +64,36 @@ function formatBytes(bytes: number) {
 
 function formatSpeed(bytesPerSecond: number) {
   return bytesPerSecond > 0 ? `${formatBytes(bytesPerSecond)}/s` : "Calculating speed…";
+}
+
+export function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3_600);
+  const minutes = Math.floor((total % 3_600) / 60);
+  const remainder = total % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(remainder).padStart(2, "0")}s`;
+  return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
+}
+
+function formatEtaPoint(seconds: number): string {
+  const minutes = Math.max(1, Math.ceil(seconds / 60));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+export function formatEtaRange(low: number, high: number): string {
+  if (high <= 3_600) {
+    const lowMinutes = Math.max(1, Math.floor(low / 60));
+    const highMinutes = Math.max(lowMinutes, Math.ceil(high / 60));
+    return `${lowMinutes}–${highMinutes} min`;
+  }
+  return `${formatEtaPoint(low)}–${formatEtaPoint(high)}`;
+}
+
+export function formatScale(scale: number): string {
+  return `${Number.isFinite(scale) ? scale : 1}×`;
 }
 
 function labelForStatus(status: JobStatus) {
@@ -98,8 +135,26 @@ function jobStageDetail(job: Job) {
   return labelForStatus(job.status);
 }
 
-function hasMeasuredJobProgress(job: Job) {
-  return job.stage === "preflight-media" || job.stage === "audio-remux";
+function isOutputScale(value: unknown): value is OutputScale {
+  return typeof value === "number" && (outputScales as readonly number[]).includes(value);
+}
+
+function phaseDetail(job: Job): string {
+  const name = job.phase_name
+    ? `${job.phase_name.charAt(0).toUpperCase()}${job.phase_name.slice(1)}`
+    : jobStageDetail(job);
+  const counters = [name];
+  if (typeof job.phase_current === "number" && typeof job.phase_total === "number" && job.phase_total > 0) {
+    counters.push(`${job.phase_current}/${job.phase_total}`);
+  }
+  if (typeof job.chunk_current === "number" && typeof job.chunk_total === "number" && job.chunk_total > 0) {
+    counters.push(`chunk ${job.chunk_current}/${job.chunk_total}`);
+  }
+  return counters.join(" · ");
+}
+
+function expectedDimension(value: number, scale: OutputScale): number {
+  return Math.max(2, Math.floor((value * scale) / 2 + 0.5) * 2);
 }
 
 export default function App() {
@@ -107,7 +162,13 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preset, setPreset] = useState<PresetId>("3b-safe");
   const [colorCorrection, setColorCorrection] = useState<ColorCorrection>("lab");
+  const [outputScale, setOutputScale] = useState<OutputScale>(1);
+  const [scaleOptions, setScaleOptions] = useState(fallbackScaleOptions);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [sourceDimensions, setSourceDimensions] = useState<{ width: number; height: number } | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [lastPollReceivedAt, setLastPollReceivedAt] = useState(() => Date.now());
+  const [displayNow, setDisplayNow] = useState(() => Date.now());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -121,7 +182,10 @@ export default function App() {
     try {
       const [health, nextJobs] = await Promise.all([getHealth(), getJobs()]);
       if (health.status.toLowerCase() !== "ok") throw new ApiError("Service is not ready");
+      const receivedAt = Date.now();
       setJobs(sortJobs(nextJobs));
+      setLastPollReceivedAt(receivedAt);
+      setDisplayNow(receivedAt);
       setConnectionError(null);
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : "Could not reach Video Upscale service");
@@ -138,10 +202,26 @@ export default function App() {
   useEffect(() => {
     void getConfig().then((config) => {
       if (presetIds.includes(config.default_profile)) setPreset(config.default_profile);
+      if (isOutputScale(config.default_output_scale)) setOutputScale(config.default_output_scale);
+      if (Array.isArray(config.output_scales)) {
+        const validOptions = config.output_scales.filter((option) => isOutputScale(option.value));
+        if (validOptions.length > 0) setScaleOptions(validOptions);
+      }
     }).catch(() => {
       // Existing default remains usable while a host is being upgraded.
     });
   }, []);
+
+  useEffect(() => {
+    setSourceDimensions(null);
+    if (!selectedFile || typeof URL.createObjectURL !== "function") {
+      setPreviewUrl(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(selectedFile);
+    setPreviewUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [selectedFile]);
 
   const hasActiveJob = jobs.some(isActive);
   useEffect(() => {
@@ -149,6 +229,13 @@ export default function App() {
     const timer = window.setInterval(() => void refresh(), pollMs);
     return () => window.clearInterval(timer);
   }, [hasActiveJob, refresh]);
+
+  const hasTimedActiveJob = jobs.some((job) => isActive(job) && Boolean(job.started_at));
+  useEffect(() => {
+    if (!hasTimedActiveJob) return;
+    const timer = window.setInterval(() => setDisplayNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [hasTimedActiveJob]);
 
   const activeJobs = useMemo(() => jobs.filter(isActive), [jobs]);
   const finishedJobs = useMemo(() => jobs.filter((job) => !isActive(job)), [jobs]);
@@ -204,7 +291,7 @@ export default function App() {
       bytesPerSecond: 0,
     });
     try {
-      const created = await createJob(selectedFile, preset, colorCorrection, {
+      const created = await createJob(selectedFile, preset, colorCorrection, outputScale, {
         onProgress: (progress) => {
           setUploadState({ phase: "uploading", filename: selectedFile.name, ...progress });
         },
@@ -314,9 +401,28 @@ export default function App() {
               <div>
                 <strong>{selectedFile.name}</strong>
                 <span>{formatBytes(selectedFile.size)}</span>
+                {sourceDimensions && (
+                  <span>Expected output: {expectedDimension(sourceDimensions.width, outputScale)} × {expectedDimension(sourceDimensions.height, outputScale)}</span>
+                )}
               </div>
               <button type="button" className="icon-button" aria-label="Remove selected video" disabled={isSubmitting} onClick={() => setSelectedFile(null)}>{icon("x")}</button>
             </section>
+          )}
+
+          {previewUrl && (
+            <video
+              className="visually-hidden"
+              src={previewUrl}
+              preload="metadata"
+              aria-hidden="true"
+              onLoadedMetadata={(event) => {
+                const video = event.currentTarget;
+                if (video.videoWidth > 0 && video.videoHeight > 0) {
+                  setSourceDimensions({ width: video.videoWidth, height: video.videoHeight });
+                }
+              }}
+              onError={() => setSourceDimensions(null)}
+            />
           )}
 
           {uploadState && <UploadMonitor upload={uploadState} />}
@@ -329,6 +435,17 @@ export default function App() {
                 <span className="radio-mark" aria-hidden="true" />
                 <span className="preset-copy"><strong>{option.title}</strong><small>{option.description}</small></span>
                 {option.badge && <span className={`badge ${option.experimental ? "badge--warn" : ""}`}>{option.badge}</span>}
+              </label>
+            ))}
+          </fieldset>
+
+          <fieldset className="scale-fieldset">
+            <legend>Output resolution</legend>
+            {scaleOptions.map((option) => (
+              <label key={option.value} className={`scale-option ${outputScale === option.value ? "scale-option--selected" : ""}`}>
+                <input type="radio" name="output-scale" value={option.value} checked={outputScale === option.value} disabled={isSubmitting} onChange={() => setOutputScale(option.value)} />
+                <span className="radio-mark" aria-hidden="true" />
+                <span className="scale-copy"><strong>{option.label}</strong><small>{option.description}</small></span>
               </label>
             ))}
           </fieldset>
@@ -349,14 +466,14 @@ export default function App() {
             {isSubmitting ? icon("spinner") : icon("play")}
             {isSubmitting ? uploadState?.phase === "validating" ? "Validating video…" : "Uploading video…" : "Start processing"}
           </button>
-          <p className="settings-footnote">2× output. One job processes at a time. Work files clear automatically.</p>
+          <p className="settings-footnote">{formatScale(outputScale)} output. One job processes at a time. Work files clear automatically.</p>
         </form>
 
         <section className="panel jobs-panel" aria-live="polite">
           <PanelTitle number="2" title={`Job Queue & Progress${activeJobs.length ? ` (${activeJobs.length})` : ""}`} />
           {activeJobs.length > 0 ? (
             <div className="job-list">
-              {activeJobs.map((job) => <JobCard key={job.id} job={job} onCancel={onCancel} />)}
+              {activeJobs.map((job) => <JobCard key={job.id} job={job} onCancel={onCancel} now={displayNow} lastPollReceivedAt={lastPollReceivedAt} />)}
             </div>
           ) : (
             <div className="empty-state">
@@ -440,10 +557,39 @@ function DebugConsole({ upload, job, text }: { upload: UploadState | null; job: 
   );
 }
 
-function JobCard({ job, onCancel }: { job: Job; onCancel: (id: string) => Promise<void> }) {
-  const progress = Math.max(0, Math.min(100, job.progress));
-  const measuredProgress = hasMeasuredJobProgress(job);
-  const detail = jobStageDetail(job);
+function JobCard({
+  job,
+  onCancel,
+  now,
+  lastPollReceivedAt,
+}: {
+  job: Job;
+  onCancel: (id: string) => Promise<void>;
+  now: number;
+  lastPollReceivedAt: number;
+}) {
+  const staleWarning = job.heartbeat_stale
+    ? "Progress signal stale — processing may still be active"
+    : job.progress_stale
+      ? "Process is alive, but measured work has not advanced"
+      : null;
+  const measuredProgress = job.progress_source === "measured"
+    && Number.isFinite(job.progress)
+    && staleWarning === null;
+  const progress = Math.max(0, Math.min(99, Math.round(job.progress)));
+  const detail = phaseDetail(job);
+  const elapsed = job.started_at && typeof job.elapsed_seconds === "number" && Number.isFinite(job.elapsed_seconds)
+    ? Math.max(0, job.elapsed_seconds + Math.floor(Math.max(0, now - lastPollReceivedAt) / 1_000))
+    : null;
+  const hasEta = staleWarning === null
+    && typeof job.eta_low_seconds === "number"
+    && Number.isFinite(job.eta_low_seconds)
+    && typeof job.eta_high_seconds === "number"
+    && Number.isFinite(job.eta_high_seconds)
+    && job.eta_low_seconds >= 0
+    && job.eta_high_seconds >= job.eta_low_seconds
+    && job.eta_confidence !== "none";
+  const progressValueText = staleWarning ?? "Calibrating progress";
   return (
     <article className="job-card">
       <div className="job-card__top">
@@ -452,17 +598,32 @@ function JobCard({ job, onCancel }: { job: Job; onCancel: (id: string) => Promis
           <strong>{job.original_filename}</strong>
           <span className="job-state"><i />{labelForStatus(job.status)}</span>
           <small>{detail}</small>
-          <small>{presetTitle(job.preset)} · 2× · MP4</small>
+          <small>{presetTitle(job.preset)} · {formatScale(job.output_scale)} · MP4</small>
         </div>
-        <strong className="job-percent">{measuredProgress ? `${progress}%` : "Live"}</strong>
+        <strong className="job-percent">{measuredProgress ? `${progress}%` : staleWarning ? "Attention" : "Live"}</strong>
       </div>
       <div className="progress-row">
         {measuredProgress ? (
           <div className="progress-bar" aria-label={`${progress}% complete`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
         ) : (
-          <div className="progress-bar progress-bar--indeterminate" aria-label="Processing status" role="progressbar" aria-valuetext={detail}><span /></div>
+          <div className="progress-bar progress-bar--indeterminate" aria-label="Processing status" role="progressbar" aria-valuetext={progressValueText}><span /></div>
         )}
         <button type="button" className="cancel-button" onClick={() => void onCancel(job.id)}>Cancel</button>
+      </div>
+      <div className="job-timing">
+        {elapsed !== null && <span>Elapsed {formatDuration(elapsed)}</span>}
+        {staleWarning ? (
+          <p className="progress-warning" role="status">{staleWarning}</p>
+        ) : hasEta ? (
+          <>
+            <span>ETA {formatEtaRange(job.eta_low_seconds as number, job.eta_high_seconds as number)}</span>
+            <span className="eta-confidence">{job.eta_confidence.charAt(0).toUpperCase() + job.eta_confidence.slice(1)} confidence</span>
+          </>
+        ) : (
+          <span>Calibrating…</span>
+        )}
+        {job.last_heartbeat_at && <small>Heartbeat <time dateTime={job.last_heartbeat_at}>{job.last_heartbeat_at}</time></small>}
+        {job.last_progress_at && <small>Last measured progress <time dateTime={job.last_progress_at}>{job.last_progress_at}</time></small>}
       </div>
     </article>
   );
@@ -476,7 +637,7 @@ function ResultCard({ job, onDelete }: { job: Job; onDelete: (id: string) => Pro
         <span className="result-icon">{completed ? icon("check") : icon("x")}</span>
         <div>
           <strong>{completed ? job.output_filename ?? job.original_filename : job.original_filename}</strong>
-          <p>{completed ? `${presetTitle(job.preset)} · 2× MP4` : labelForStatus(job.status)}</p>
+          <p>{completed ? <>{presetTitle(job.preset)} · {formatScale(job.output_scale)} MP4 · <span>100%</span></> : labelForStatus(job.status)}</p>
         </div>
         <button type="button" className="icon-button" aria-label={`Delete ${job.original_filename}`} onClick={() => void onDelete(job.id)}>{icon("trash")}</button>
       </div>

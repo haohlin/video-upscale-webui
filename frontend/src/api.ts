@@ -1,4 +1,4 @@
-import type { ColorCorrection, Health, Job, JobLogTail, PresetId, RuntimeConfig, UploadProgress } from "./types";
+import type { ColorCorrection, Health, Job, JobLogTail, OutputScale, PresetId, RuntimeConfig, UploadProgress } from "./types";
 
 const apiRoot = "/api";
 
@@ -53,6 +53,7 @@ export async function createJob(
   video: File,
   preset: PresetId,
   colorCorrection: ColorCorrection,
+  outputScale: OutputScale,
   callbacks: {
     onProgress?: (progress: UploadProgress) => void;
     onUploadComplete?: () => void;
@@ -62,6 +63,7 @@ export async function createJob(
   form.append("video", video);
   form.append("preset", preset);
   form.append("color_correction", colorCorrection);
+  form.append("output_scale", String(outputScale));
 
   return new Promise<Job>((resolve, reject) => {
     const startedAt = performance.now();

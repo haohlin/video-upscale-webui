@@ -52,6 +52,7 @@ describe("createJob", () => {
       new File(["movie"], "lake.mov", { type: "video/quicktime" }),
       "3b-safe",
       "lab",
+      1,
       { onProgress },
     );
     const request = FakeXmlHttpRequest.instances[0];
@@ -63,5 +64,24 @@ describe("createJob", () => {
     await expect(pending).resolves.toMatchObject({ id: "job-1" });
     expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ loaded: 50, total: 100 }));
     expect(request.setRequestHeader).toHaveBeenCalledWith("X-Video-Upscale-Request", "1");
+  });
+
+  it("submits the selected output scale in multipart form data", async () => {
+    vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
+
+    const pending = createJob(
+      new File(["movie"], "lake.mov", { type: "video/quicktime" }),
+      "3b-safe",
+      "lab",
+      0.5,
+    );
+    const request = FakeXmlHttpRequest.instances[0];
+    const body = request.send.mock.calls[0]?.[0] as FormData;
+    request.status = 201;
+    request.responseText = JSON.stringify(createdJob);
+    request.onload?.(new ProgressEvent("load"));
+
+    await expect(pending).resolves.toMatchObject({ id: "job-1" });
+    expect(body.get("output_scale")).toBe("0.5");
   });
 });

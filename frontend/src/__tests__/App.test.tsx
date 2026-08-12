@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import * as api from "../api";
+import type { Job, RuntimeConfig } from "../types";
 
 vi.mock("../api", () => ({
   createJob: vi.fn(),
@@ -21,16 +22,93 @@ const getConfig = vi.mocked(api.getConfig);
 const getJobLog = vi.mocked(api.getJobLog);
 const createJob = vi.mocked(api.createJob);
 
+const runtimeConfig: RuntimeConfig = {
+  default_profile: "3b-safe",
+  presets: ["3b-safe", "7b-fp8-experimental"],
+  default_output_scale: 1,
+  output_scales: [
+    { value: 1, label: "1x Original", description: "Original dimensions; full generative restoration." },
+    { value: 0.5, label: "0.5x Balanced", description: "Half width and height; generative restoration with fewer output pixels." },
+    { value: 0.25, label: "0.25x Fast", description: "Quarter width and height; experimental generative restoration." },
+    { value: 2, label: "2x Upscale", description: "Double width and height; highest processing cost." },
+  ],
+};
+
+function jobFixture(overrides: Partial<Job> = {}): Job {
+  return {
+    id: "job-1",
+    original_filename: "lake.mov",
+    preset: "3b-safe",
+    color_correction: "lab",
+    output_scale: 1,
+    target_width: 1920,
+    target_height: 1080,
+    status: "queued",
+    progress: 0,
+    stage: "queued",
+    created_at: "2026-08-12T06:00:00Z",
+    updated_at: "2026-08-12T06:00:00Z",
+    started_at: null,
+    finished_at: null,
+    elapsed_seconds: null,
+    last_heartbeat_at: null,
+    last_progress_at: null,
+    progress_source: "none",
+    phase_name: null,
+    phase_current: null,
+    phase_total: null,
+    chunk_current: null,
+    chunk_total: null,
+    eta_low_seconds: null,
+    eta_high_seconds: null,
+    eta_confidence: "none",
+    heartbeat_stale: false,
+    progress_stale: false,
+    output_filename: null,
+    error: null,
+    requires_preflight: false,
+    ...overrides,
+  };
+}
+
+function runningJob(overrides: Partial<Job> = {}): Job {
+  return jobFixture({
+    status: "running",
+    progress: 38,
+    progress_source: "measured",
+    stage: "decoding",
+    phase_name: "decoding",
+    phase_current: 5,
+    phase_total: 10,
+    chunk_current: 2,
+    chunk_total: 4,
+    started_at: "2026-08-12T06:00:00Z",
+    elapsed_seconds: 120,
+    eta_low_seconds: 2700,
+    eta_high_seconds: 3600,
+    eta_confidence: "medium",
+    last_heartbeat_at: "2026-08-12T06:02:00Z",
+    last_progress_at: "2026-08-12T06:01:55Z",
+    ...overrides,
+  });
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
 describe("App", () => {
   beforeEach(() => {
     getJobs.mockResolvedValue([]);
     getHealth.mockResolvedValue({ status: "ok" });
-    getConfig.mockResolvedValue({ default_profile: "3b-safe", presets: ["3b-safe", "7b-fp8-experimental"] });
+    getConfig.mockResolvedValue(runtimeConfig);
     getJobLog.mockResolvedValue({ text: "", next_offset: 0, size: 0, truncated: false });
     createJob.mockReset();
   });
 
-  it("shows real upload controls and marks 7B as experimental", async () => {
+  it("shows upload controls and server-configured output scale choices", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Video Upscale" })).toBeVisible();
@@ -38,46 +116,170 @@ describe("App", () => {
       "accept",
       "video/*,.mp4,.mov,.mkv,.avi,.webm",
     );
-    expect(screen.getByText("Choose from Photos")).toBeVisible();
-    expect(screen.getByText("Experimental")).toBeVisible();
-    expect(screen.queryByText("Real-ESRGAN Conservative")).not.toBeInTheDocument();
-    expect(screen.getByText("Finished MP4 files remain available until you delete them.")).toBeVisible();
+    expect(screen.getByRole("group", { name: "Output resolution" })).toBeVisible();
+    expect(screen.getByRole("radio", { name: /1x Original.*Original dimensions; full generative restoration/i })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /0.5x Balanced.*Half width and height; generative restoration with fewer output pixels/i })).toBeVisible();
+    expect(screen.getByRole("radio", { name: /0.25x Fast.*Quarter width and height; experimental generative restoration/i })).toBeVisible();
+    expect(screen.getByRole("radio", { name: /2x Upscale.*Double width and height; highest processing cost/i })).toBeVisible();
   });
 
-  it("submits selected video and current processing settings", async () => {
+  it("submits selected video and server-configured output scale", async () => {
     const user = userEvent.setup();
-    createJob.mockResolvedValue({
-      id: "job-1",
-      original_filename: "lake.mov",
-      preset: "3b-safe",
-      color_correction: "lab",
-      status: "queued",
-      progress: 0,
-      stage: "Queued",
-      created_at: "2026-07-29T10:00:00Z",
-      updated_at: "2026-07-29T10:00:00Z",
-      output_filename: null,
-      error: null,
-      requires_preflight: false,
-    });
+    createJob.mockResolvedValue(jobFixture({ output_scale: 0.5, target_width: 960, target_height: 540 }));
     render(<App />);
 
-    const input = await screen.findByLabelText("Choose video file");
-    await user.upload(input, new File(["movie"], "lake.mov", { type: "video/quicktime" }));
+    await user.click(await screen.findByRole("radio", { name: /0.5x Balanced/i }));
+    await user.upload(screen.getByLabelText("Choose video file"), new File(["movie"], "lake.mov", { type: "video/quicktime" }));
     await user.click(screen.getByRole("button", { name: "Start processing" }));
 
     expect(createJob).toHaveBeenCalledWith(
       expect.objectContaining({ name: "lake.mov" }),
       "3b-safe",
       "lab",
+      0.5,
       expect.any(Object),
     );
+  });
+
+  it("uses runtime-configured defaults instead of hard-coded UI defaults", async () => {
+    getConfig.mockResolvedValue({
+      ...runtimeConfig,
+      default_profile: "7b-fp8-experimental",
+      default_output_scale: 0.25,
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("radio", { name: /SeedVR2 7B FP8 Experimental/i })).toBeChecked();
+      expect(screen.getByRole("radio", { name: /0.25x Fast/i })).toBeChecked();
+    });
+  });
+
+  it("previews local output dimensions and revokes object URLs on replacement and unmount", async () => {
+    const createObjectURL = vi.fn()
+      .mockReturnValueOnce("blob:preview-one")
+      .mockReturnValueOnce("blob:preview-two");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }));
+    vi.spyOn(HTMLVideoElement.prototype, "videoWidth", "get").mockReturnValue(1920);
+    vi.spyOn(HTMLVideoElement.prototype, "videoHeight", "get").mockReturnValue(1080);
+    const user = userEvent.setup();
+    const view = render(<App />);
+    const input = await screen.findByLabelText("Choose video file");
+
+    await user.upload(input, new File(["one"], "one.mov", { type: "video/quicktime" }));
+    await waitFor(() => expect(document.querySelector("video")).not.toBeNull());
+    fireEvent.loadedMetadata(document.querySelector("video") as HTMLVideoElement);
+    await user.click(screen.getByRole("radio", { name: /0.5x Balanced/i }));
+    expect(screen.getByText("Expected output: 960 × 540")).toBeVisible();
+
+    await user.upload(input, new File(["two"], "two.mov", { type: "video/quicktime" }));
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-one"));
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-two");
+  });
+
+  it("shows measured progress, phase counters, server ETA, and a live elapsed timer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-12T06:02:00Z"));
+    getJobs
+      .mockResolvedValueOnce([runningJob()])
+      .mockImplementation(() => new Promise(() => undefined));
+    render(<App />);
+
+    expect(await screen.findByText("38%")).toBeVisible();
+    expect(screen.getByText("Decoding · 5/10 · chunk 2/4")).toBeVisible();
+    expect(screen.getByText("Elapsed 2m 00s")).toBeVisible();
+    expect(screen.getByText("ETA 45–60 min")).toBeVisible();
+    expect(screen.getByText("Medium confidence")).toBeVisible();
+    expect(screen.getByText("2026-08-12T06:02:00Z").closest("small")).toHaveTextContent("Heartbeat 2026-08-12T06:02:00Z");
+    expect(screen.getByText("2026-08-12T06:01:55Z").closest("small")).toHaveTextContent("Last measured progress 2026-08-12T06:01:55Z");
+    expect(screen.getByRole("progressbar", { name: "38% complete" })).toHaveAttribute("aria-valuenow", "38");
+
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(screen.getByText("Elapsed 2m 05s")).toBeVisible();
+  });
+
+  it("calibrates without inventing a percentage when progress source is none", async () => {
+    getJobs.mockResolvedValue([runningJob({ progress_source: "none", eta_low_seconds: null, eta_high_seconds: null, eta_confidence: "none" })]);
+    render(<App />);
+
+    expect(await screen.findByText("Calibrating…")).toBeVisible();
+    expect(screen.queryByText("38%")).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Processing status" })).toHaveAttribute("aria-valuetext", "Calibrating progress");
+  });
+
+  it("keeps historical estimates separate from measured percentage", async () => {
+    getJobs.mockResolvedValue([runningJob({ progress_source: "historical" })]);
+    render(<App />);
+
+    expect(await screen.findByText("ETA 45–60 min")).toBeVisible();
+    expect(screen.queryByText("38%")).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Processing status" })).toHaveAttribute("aria-valuetext", "Calibrating progress");
+  });
+
+  it("warns when heartbeat is stale and hides ETA", async () => {
+    getJobs.mockResolvedValue([runningJob({ heartbeat_stale: true })]);
+    render(<App />);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Progress signal stale — processing may still be active");
+    expect(screen.queryByText(/ETA 45/)).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Processing status" })).toHaveAttribute(
+      "aria-valuetext",
+      "Progress signal stale — processing may still be active",
+    );
+  });
+
+  it("distinguishes live heartbeat from stale measured work and hides ETA", async () => {
+    getJobs.mockResolvedValue([runningJob({ progress_stale: true })]);
+    render(<App />);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Process is alive, but measured work has not advanced");
+    expect(screen.queryByText(/ETA 45/)).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Processing status" })).toHaveAttribute(
+      "aria-valuetext",
+      "Process is alive, but measured work has not advanced",
+    );
+  });
+
+  it("renders a legacy active job with missing optional timing fields", async () => {
+    const legacy = runningJob();
+    delete (legacy as Partial<Job>).started_at;
+    delete (legacy as Partial<Job>).finished_at;
+    delete (legacy as Partial<Job>).elapsed_seconds;
+    delete (legacy as Partial<Job>).last_heartbeat_at;
+    delete (legacy as Partial<Job>).last_progress_at;
+    delete (legacy as Partial<Job>).phase_name;
+    delete (legacy as Partial<Job>).phase_current;
+    delete (legacy as Partial<Job>).phase_total;
+    delete (legacy as Partial<Job>).chunk_current;
+    delete (legacy as Partial<Job>).chunk_total;
+    delete (legacy as Partial<Job>).eta_low_seconds;
+    delete (legacy as Partial<Job>).eta_high_seconds;
+    getJobs.mockResolvedValue([legacy]);
+    render(<App />);
+
+    expect(await screen.findByText("lake.mov")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "38% complete" })).toBeVisible();
+    expect(screen.queryByText(/^Elapsed /)).not.toBeInTheDocument();
+  });
+
+  it("renders exact 100% only for backend-completed state", async () => {
+    getJobs.mockResolvedValue([
+      jobFixture({ id: "complete", status: "completed", progress: 17, output_filename: "lake-restored.mp4", finished_at: "2026-08-12T07:00:00Z" }),
+      jobFixture({ id: "failed", original_filename: "broken.mp4", status: "failed", progress: 100, error: "MPS out of memory" }),
+    ]);
+    render(<App />);
+
+    expect(await screen.findByText("100%")).toBeVisible();
+    expect(screen.getAllByText("100%")).toHaveLength(1);
+    expect(screen.getByText("MPS out of memory")).toBeVisible();
   });
 
   it("shows measured browser upload progress before a server job exists", async () => {
     const user = userEvent.setup();
     createJob.mockImplementation((async (...args: unknown[]) => {
-      const callbacks = args[3] as { onProgress?: (progress: { loaded: number; total: number; bytesPerSecond: number }) => void } | undefined;
+      const callbacks = args[4] as { onProgress?: (progress: { loaded: number; total: number; bytesPerSecond: number }) => void } | undefined;
       callbacks?.onProgress?.({ loaded: 50 * 1024 * 1024, total: 100 * 1024 * 1024, bytesPerSecond: 5 * 1024 * 1024 });
       return new Promise(() => undefined);
     }) as typeof api.createJob);
@@ -93,22 +295,7 @@ describe("App", () => {
   });
 
   it("shows a toggleable live debug console for an active job", async () => {
-    getJobs.mockResolvedValue([
-      {
-        id: "running-1",
-        original_filename: "lake.mov",
-        preset: "3b-safe",
-        color_correction: "lab",
-        status: "running",
-        progress: 0,
-        stage: "seedvr2-start",
-        created_at: "2026-07-29T10:00:00Z",
-        updated_at: "2026-07-29T10:01:00Z",
-        output_filename: null,
-        error: null,
-        requires_preflight: false,
-      },
-    ]);
+    getJobs.mockResolvedValue([runningJob({ id: "running-1", stage: "seedvr2-start", phase_name: null })]);
     getJobLog.mockResolvedValue({
       text: "PROGRESS 0 seedvr2-start\nSeedVR2 rendering started\n",
       next_offset: 52,
@@ -123,40 +310,5 @@ describe("App", () => {
     expect(await screen.findByText("Live debug console")).toBeVisible();
     expect(await screen.findByText(/SeedVR2 rendering started/)).toBeVisible();
     expect(getJobLog).toHaveBeenCalledWith("running-1", 0);
-  });
-
-  it("uses runtime-configured default profile instead of a hard-coded UI default", async () => {
-    getConfig.mockResolvedValue({
-      default_profile: "7b-fp8-experimental",
-      presets: ["3b-safe", "7b-fp8-experimental"],
-    });
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("radio", { name: /SeedVR2 7B FP8 Experimental/i })).toBeChecked();
-    });
-  });
-
-  it("renders backend failure instead of inventing success", async () => {
-    getJobs.mockResolvedValue([
-      {
-        id: "failed-1",
-        original_filename: "broken.mp4",
-        preset: "3b-safe",
-        color_correction: "lab",
-        status: "failed",
-        progress: 12,
-        stage: "Processing",
-        created_at: "2026-07-29T10:00:00Z",
-        updated_at: "2026-07-29T10:01:00Z",
-        output_filename: null,
-        error: "MPS out of memory",
-        requires_preflight: false,
-      },
-    ]);
-    render(<App />);
-
-    expect(await screen.findByText("MPS out of memory")).toBeVisible();
-    expect(screen.queryByRole("link", { name: /download mp4/i })).not.toBeInTheDocument();
   });
 });
