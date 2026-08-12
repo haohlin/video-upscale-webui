@@ -86,6 +86,38 @@ def test_three_matching_runs_plus_stable_current_rate_is_medium_confidence():
     assert result.source == "historical"
 
 
+def test_high_confidence_requires_total_width_at_most_twenty_percent_of_midpoint():
+    def estimate_with_later_phase_quartiles(
+        lower_quartile: float, upper_quartile: float
+    ) -> EtaEstimate:
+        factors = [0.7, lower_quartile, 1.0, upper_quartile, 1.3]
+        samples = [
+            sample(
+                f"job-{index}",
+                phase,
+                seconds if phase == "encoding" else seconds * factor,
+            )
+            for index, factor in enumerate(factors)
+            for phase, seconds in PHASE_SECONDS.items()
+        ]
+        return estimate_eta(active(), samples, 86_400)
+
+    boundary = estimate_with_later_phase_quartiles(0.9, 1.1)
+    above_boundary = estimate_with_later_phase_quartiles(0.89, 1.11)
+
+    assert boundary.confidence == "high"
+    boundary_midpoint = (boundary.low_seconds + boundary.high_seconds) / 2
+    assert boundary.high_seconds - boundary.low_seconds <= boundary_midpoint * 0.20
+    assert above_boundary.confidence == "medium"
+    above_midpoint = (
+        above_boundary.low_seconds + above_boundary.high_seconds
+    ) / 2
+    assert (
+        above_boundary.high_seconds - above_boundary.low_seconds
+        > above_midpoint * 0.20
+    )
+
+
 def test_missing_rate_for_any_remaining_phase_is_calibrating():
     samples = [sample(f"job-{index}", "encoding", 100) for index in range(3)]
 

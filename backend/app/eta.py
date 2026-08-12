@@ -158,28 +158,32 @@ def estimate_eta(
     if comparable_jobs <= 2:
         low_seconds = min(low_seconds, central_seconds * 0.6)
         high_seconds = max(high_seconds, central_seconds * 1.6)
+    elif comparable_jobs >= 5 and current_rate_stable:
+        # Five stable runs may earn high confidence, so use a 20%-total-width
+        # calibration floor. Wider observed quartiles remain wider and medium.
+        low_seconds = min(low_seconds, central_seconds * 0.9)
+        high_seconds = max(high_seconds, central_seconds * 1.1)
     else:
         low_seconds = min(low_seconds, central_seconds * 0.8)
         high_seconds = max(high_seconds, central_seconds * 1.2)
 
-    midpoint = (low_seconds + high_seconds) / 2
-    half_width = (high_seconds - low_seconds) / 2
+    deadline = max(0, int(deadline_seconds))
+    low = min(deadline, max(0, math.floor(low_seconds)))
+    high = min(deadline, max(0, math.ceil(high_seconds)))
+    high = max(low, high)
+    midpoint = (low + high) / 2
+    range_width = high - low
     if (
         comparable_jobs >= 5
         and current_rate_stable
         and midpoint > 0
-        and half_width <= midpoint * 0.20
+        and range_width <= midpoint * 0.20
     ):
         confidence = "high"
     elif comparable_jobs >= 3 and current_rate_stable:
         confidence = "medium"
     else:
         confidence = "low"
-
-    deadline = max(0, int(deadline_seconds))
-    low = min(deadline, max(0, math.floor(low_seconds)))
-    high = min(deadline, max(0, math.ceil(high_seconds)))
-    high = max(low, high)
     source = "historical" if historical_groups else "measured"
     if not historical_groups and not has_current_run_sample and current_rate is None:
         return EtaEstimate(None, None, "none", "none")

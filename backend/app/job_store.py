@@ -509,7 +509,7 @@ class JobStore:
             if (
                 publish_performance
                 and row["runtime_profile_fingerprint"] != "legacy:unknown"
-                and row["progress_source"] == "measured"
+                and row["progress_source"] in {"measured", "historical"}
                 and self._fresh_at(
                     row["last_heartbeat_at"], current, HEARTBEAT_STALE_SECONDS
                 )
@@ -693,17 +693,32 @@ class JobStore:
         return samples
 
     def update_eta(self, job_id: str, estimate: EtaEstimate) -> None:
+        estimate_source = (
+            estimate.source
+            if estimate.source in {"historical", "measured"}
+            else None
+        )
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE jobs
-                SET eta_low_seconds = ?, eta_high_seconds = ?, eta_confidence = ?
+                SET eta_low_seconds = ?, eta_high_seconds = ?, eta_confidence = ?,
+                    progress_source = CASE
+                        WHEN ? IS NOT NULL THEN ?
+                        WHEN phase_current IS NOT NULL AND phase_total IS NOT NULL
+                            THEN 'measured'
+                        WHEN chunk_current IS NOT NULL AND chunk_total IS NOT NULL
+                            THEN 'measured'
+                        ELSE progress_source
+                    END
                 WHERE id = ? AND status IN ('running', 'preflight')
                 """,
                 (
                     estimate.low_seconds,
                     estimate.high_seconds,
                     estimate.confidence,
+                    estimate_source,
+                    estimate_source,
                     job_id,
                 ),
             )

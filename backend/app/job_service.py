@@ -20,7 +20,7 @@ from .domain import (
     PreflightLimits,
     target_dimensions,
 )
-from .eta import ActiveWork, estimate_eta, workload_bucket
+from .eta import ActiveWork, EtaEstimate, estimate_eta, workload_bucket
 from .job_store import JobStore
 from .media import MediaProbe, normalize_media_info
 from .progress import ProgressReport
@@ -289,7 +289,7 @@ class JobService:
             if (
                 current is not None
                 and current.runtime_profile_fingerprint != "legacy:unknown"
-                and current.progress_source == "measured"
+                and current.progress_source in {"measured", "historical"}
             ):
                 freshness = self.public_job(current)
                 publish_performance = not bool(
@@ -312,6 +312,16 @@ class JobService:
         if not accepted:
             return False
         event = report.event
+        if (
+            report.invocation == "full"
+            and event is not None
+            and event.event_type == "chunk_completed"
+        ):
+            self.store.update_eta(
+                job.id,
+                EtaEstimate(None, None, "none", "none"),
+            )
+            return True
         if (
             report.invocation != "full"
             or event is None

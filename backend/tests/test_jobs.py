@@ -963,6 +963,30 @@ def _heartbeat_report(*, sequence: int, work_sequence: int, invocation: str = "f
     )
 
 
+def _chunk_completed_report(
+    *, sequence: int, work_sequence: int, invocation: str = "full"
+):
+    event = ProgressEvent(
+        sequence=sequence,
+        work_sequence=work_sequence,
+        measured_work=True,
+        event_type="chunk_completed",
+        chunk_index=1,
+        chunk_count=4,
+        completed_unique_frames=25,
+        chunk_unique_frames=0,
+        total_unique_frames=100,
+    )
+    return ProgressReport(
+        percent=43,
+        stage="chunk-complete",
+        invocation=invocation,
+        work_sequence=work_sequence,
+        measured_work=True,
+        event=event,
+    )
+
+
 def test_timing_and_monotonic_report_freshness_are_persisted(tmp_path, monkeypatch):
     """Regressed event order or heartbeat-only traffic must not fake work freshness."""
     store = JobStore(tmp_path)
@@ -1550,6 +1574,13 @@ def test_update_eta_clears_calibrating_bounds_without_losing_measured_progress(
         _phase_report(sequence=1, work_sequence=1, current_unit=2, elapsed_seconds=20),
     )
     store.update_eta(job.id, EtaEstimate(100, 200, "low", "historical"))
+    historical = store.get(job.id)
+    assert historical is not None
+    assert historical.progress_source == "historical"
+    store.update_eta(job.id, EtaEstimate(90, 180, "low", "measured"))
+    measured = store.get(job.id)
+    assert measured is not None
+    assert measured.progress_source == "measured"
     store.update_eta(job.id, EtaEstimate(None, None, "none", "none"))
 
     updated = store.get(job.id)
@@ -1590,6 +1621,43 @@ def test_service_clamps_eta_to_remaining_process_deadline(tmp_path, monkeypatch)
     assert 0 <= updated.eta_low_seconds <= updated.eta_high_seconds <= 100
 
 
+def test_accepted_chunk_completion_clears_eta_after_skipped_final_phase_report(
+    tmp_path,
+):
+    """Immediate chunk completion must not retain ETA from older phase counters."""
+    settings = Settings.from_environment().with_data_root(tmp_path, None)
+    store = JobStore(tmp_path)
+    store.initialize()
+    service = JobService(settings, store, ValidProbe(), CompletedRunner())
+    job = _create_timing_test_job(store, "eta-chunk-refresh")
+    assert store.claim_next_queued() is not None
+    _seed_eta_history(
+        store,
+        fingerprint=job.runtime_profile_fingerprint,
+        sample_group_prefix="chunk-refresh",
+    )
+    assert service._record_progress(
+        job,
+        _phase_report(sequence=1, work_sequence=1, current_unit=5, elapsed_seconds=50),
+    )
+    before = store.get(job.id)
+    assert before is not None
+    assert before.eta_low_seconds is not None
+
+    assert service._record_progress(
+        job,
+        _chunk_completed_report(sequence=2, work_sequence=2),
+    )
+
+    refreshed = store.get(job.id)
+    assert refreshed is not None
+    assert refreshed.phase_name is None
+    assert refreshed.eta_low_seconds is None
+    assert refreshed.eta_high_seconds is None
+    assert refreshed.eta_confidence == "none"
+    assert refreshed.progress_source == "measured"
+
+
 class EtaReportingRunner:
     def __init__(self, *, refresh: bool = False):
         self.reported = threading.Event()
@@ -1622,6 +1690,48 @@ class EtaReportingRunner:
                 )
             )
             self.refreshed.set()
+        self.release.wait(1)
+        Path(job.output_path).write_bytes(b"mp4-result")
+
+
+class CurrentRunEtaReportingRunner:
+    def __init__(self):
+        self.reported = threading.Event()
+        self.release = threading.Event()
+
+    def preflight(self, job, limits, report_progress, is_cancelled):
+        raise AssertionError("unexpected preflight")
+
+    def run(self, job, report_progress, is_cancelled):
+        for sequence, (phase, elapsed_seconds) in enumerate(
+            {
+                "encoding": 100,
+                "upscaling": 300,
+                "decoding": 500,
+                "postprocessing": 100,
+            }.items(),
+            start=1,
+        ):
+            report_progress(
+                _phase_report(
+                    sequence=sequence,
+                    work_sequence=sequence,
+                    current_unit=10,
+                    elapsed_seconds=elapsed_seconds,
+                    phase=phase,
+                    chunk_index=1,
+                )
+            )
+        report_progress(
+            _phase_report(
+                sequence=5,
+                work_sequence=5,
+                current_unit=5,
+                elapsed_seconds=50,
+                chunk_index=2,
+            )
+        )
+        self.reported.set()
         self.release.wait(1)
         Path(job.output_path).write_bytes(b"mp4-result")
 
@@ -1678,6 +1788,22 @@ def test_first_active_job_exposes_measured_progress_while_eta_calibrates(tmp_pat
     assert payload["progress_source"] == "measured"
 
 
+def test_api_eta_exposes_measured_source_from_completed_current_run_chunks(tmp_path):
+    """Current-run calibration must serialize measured ETA provenance."""
+    runner = CurrentRunEtaReportingRunner()
+    client = make_client(tmp_path, runner=runner)
+    job_id = submit_video(client).json()["id"]
+    assert runner.reported.wait(1)
+
+    payload = client.get(f"/api/jobs/{job_id}").json()
+    runner.release.set()
+
+    assert payload["eta_low_seconds"] is not None
+    assert payload["eta_high_seconds"] is not None
+    assert payload["eta_confidence"] == "low"
+    assert payload["progress_source"] == "measured"
+
+
 def test_api_eta_learns_anonymous_history_without_job_rows_or_profile_noise(tmp_path):
     """ETA refresh must use durable matching history, not deleted jobs or noisy profiles."""
     fingerprint = (
@@ -1707,6 +1833,7 @@ def test_api_eta_learns_anonymous_history_without_job_rows_or_profile_noise(tmp_
     assert runner.reported.wait(1)
     before = client.get(f"/api/jobs/{job_id}").json()
     assert before["eta_confidence"] == "medium"
+    assert before["progress_source"] == "historical"
     assert isinstance(before["eta_low_seconds"], int)
     assert isinstance(before["eta_high_seconds"], int)
     assert before["eta_low_seconds"] <= before["eta_high_seconds"]
