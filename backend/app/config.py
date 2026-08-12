@@ -25,6 +25,10 @@ class Settings:
     default_profile: str
     ffmpeg: str
     ffprobe: str
+    default_output_scale: float = 1.0
+    device_backend_class: str = "apple-mps"
+    heartbeat_stale_seconds: int = 120
+    progress_stale_seconds: int = 300
     max_upload_bytes: int = DEFAULT_UPLOAD_LIMIT
     seedvr2_3b_model: str = DEFAULT_3B_MODEL
     seedvr2_7b_fp8_model: str = DEFAULT_7B_FP8_MODEL
@@ -87,6 +91,18 @@ class Settings:
             default_profile=os.environ.get("VIDEO_UPSCALE_DEFAULT_PROFILE", "3b-safe"),
             ffmpeg=os.environ.get("VIDEO_UPSCALE_FFMPEG", "ffmpeg"),
             ffprobe=os.environ.get("VIDEO_UPSCALE_FFPROBE", "ffprobe"),
+            default_output_scale=float(
+                os.environ.get("VIDEO_UPSCALE_DEFAULT_OUTPUT_SCALE", "1.0")
+            ),
+            device_backend_class=os.environ.get(
+                "VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "apple-mps"
+            ),
+            heartbeat_stale_seconds=int(
+                os.environ.get("VIDEO_UPSCALE_HEARTBEAT_STALE_SECONDS", "120")
+            ),
+            progress_stale_seconds=int(
+                os.environ.get("VIDEO_UPSCALE_PROGRESS_STALE_SECONDS", "300")
+            ),
             seedvr2_3b_model=os.environ.get("VIDEO_UPSCALE_SEEDVR2_3B_MODEL", DEFAULT_3B_MODEL),
             seedvr2_7b_fp8_model=os.environ.get(
                 "VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL", DEFAULT_7B_FP8_MODEL
@@ -142,6 +158,10 @@ class Settings:
             default_profile=self.default_profile,
             ffmpeg=self.ffmpeg,
             ffprobe=self.ffprobe,
+            default_output_scale=self.default_output_scale,
+            device_backend_class=self.device_backend_class,
+            heartbeat_stale_seconds=self.heartbeat_stale_seconds,
+            progress_stale_seconds=self.progress_stale_seconds,
             max_upload_bytes=max_upload_bytes or self.max_upload_bytes,
             seedvr2_3b_model=self.seedvr2_3b_model,
             seedvr2_7b_fp8_model=self.seedvr2_7b_fp8_model,

@@ -10,7 +10,15 @@ from typing import Callable
 from fastapi import HTTPException, UploadFile
 
 from .config import Settings
-from .domain import COLOR_CORRECTIONS, PRESETS, TERMINAL_STATUSES, Job, PreflightLimits
+from .domain import (
+    COLOR_CORRECTIONS,
+    OUTPUT_SCALES,
+    PRESETS,
+    TERMINAL_STATUSES,
+    Job,
+    PreflightLimits,
+    target_dimensions,
+)
 from .job_store import JobStore
 from .media import MediaProbe, normalize_media_info
 from .runner import JobCancelled, VideoRunner
@@ -41,12 +49,23 @@ class JobService:
             self._remove_partial_artifacts(interrupted_job)
         self._ensure_worker()
 
-    async def create_job(self, upload: UploadFile, preset: str | None, color_correction: str) -> Job:
+    async def create_job(
+        self,
+        upload: UploadFile,
+        preset: str | None,
+        color_correction: str,
+        output_scale: float | None,
+    ) -> Job:
         preset = preset or self.settings.default_profile
         if preset not in PRESETS:
             raise HTTPException(422, "Unsupported processing preset")
         if color_correction not in COLOR_CORRECTIONS:
             raise HTTPException(422, "Unsupported color correction")
+        output_scale = (
+            self.settings.default_output_scale if output_scale is None else output_scale
+        )
+        if output_scale not in OUTPUT_SCALES:
+            raise HTTPException(422, "Unsupported output scale")
         original_filename = upload.filename or "upload"
         suffix = Path(original_filename).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
@@ -70,6 +89,9 @@ class JobService:
                 media.frame_count,
                 media.format_name,
             )
+            target_width, target_height = target_dimensions(
+                media.width, media.height, output_scale
+            )
         except HTTPException:
             input_path.unlink(missing_ok=True)
             raise
@@ -82,6 +104,11 @@ class JobService:
         finally:
             await upload.close()
 
+        runtime_profile_fingerprint = (
+            f"seedvr2:{preset}:{self.settings.device_backend_class}:"
+            f"scale={output_scale:g}:batch=5:chunk=25:overlap=4:"
+            "dit_cache=disabled:vae_cache=disabled"
+        )
         job = self.store.create(
             job_id=job_id,
             original_filename=Path(original_filename).name,
@@ -91,6 +118,10 @@ class JobService:
             preset=preset,
             color_correction=color_correction,
             media=media,
+            output_scale=output_scale,
+            target_width=target_width,
+            target_height=target_height,
+            runtime_profile_fingerprint=runtime_profile_fingerprint,
         )
         self._ensure_worker()
         return job

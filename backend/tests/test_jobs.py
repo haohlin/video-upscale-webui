@@ -1,12 +1,14 @@
 import base64
+import sqlite3
 import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.domain import MediaInfo
+from app.domain import MediaInfo, target_dimensions
 from app.job_service import JobService
 from app.job_store import JobStore
 from app.main import create_app
@@ -110,11 +112,21 @@ def make_client_headers_client(app):
     )
 
 
-def submit_video(client, *, preset="3b-safe", color_correction="lab", name="clip.mp4"):
+def submit_video(
+    client,
+    *,
+    preset="3b-safe",
+    color_correction="lab",
+    output_scale=None,
+    name="clip.mp4",
+):
+    data = {"preset": preset, "color_correction": color_correction}
+    if output_scale is not None:
+        data["output_scale"] = output_scale
     return client.post(
         "/api/jobs",
         files={"video": (name, b"not a real video because probe is injected", "video/mp4")},
-        data={"preset": preset, "color_correction": color_correction},
+        data=data,
     )
 
 
@@ -133,6 +145,75 @@ def wait_for_status(client, job_id, wanted_status):
             return payload
         time.sleep(0.01)
     raise AssertionError(f"job {job_id} did not reach {wanted_status}")
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "scale", "expected"),
+    [
+        (1920, 1080, 1.0, (1920, 1080)),
+        (1920, 1080, 0.5, (960, 540)),
+        (2160, 3840, 0.25, (540, 960)),
+        (1281, 719, 0.5, (640, 360)),
+        (1920, 1080, 2.0, (3840, 2160)),
+    ],
+)
+def test_target_dimensions_preserve_aspect_and_even_codec_dimensions(
+    width, height, scale, expected
+):
+    assert target_dimensions(width, height, scale) == expected
+
+
+def test_upload_defaults_to_original_resolution_and_exposes_target_dimensions(tmp_path):
+    client = make_client(tmp_path)
+    response = submit_video(client)
+    assert response.status_code == 201
+    assert response.json()["output_scale"] == 1.0
+    assert response.json()["target_width"] == 640
+    assert response.json()["target_height"] == 360
+    assert response.json()["frame_count"] == 105
+    assert response.json()["runtime_profile_fingerprint"] == (
+        "seedvr2:3b-safe:apple-mps:scale=1:batch=5:chunk=25:overlap=4:"
+        "dit_cache=disabled:vae_cache=disabled"
+    )
+
+
+@pytest.mark.parametrize("scale", ["0.25", "0.5", "1", "2"])
+def test_upload_accepts_fixed_output_scale_allowlist(tmp_path, scale):
+    class ScaleProbe:
+        def inspect(self, path: Path) -> dict[str, float | int]:
+            return {"duration_seconds": 3.5, "width": 1920, "height": 1080}
+
+    client = make_client(tmp_path, probe=ScaleProbe())
+    response = submit_video(client, output_scale=scale)
+    assert response.status_code == 201
+    assert response.json()["output_scale"] == float(scale)
+
+
+@pytest.mark.parametrize("scale", ["0", "0.3", "4", "nan", "inf", "1;touch /tmp/pwned"])
+def test_upload_rejects_non_allowlisted_output_scale(tmp_path, scale):
+    client = make_client(tmp_path)
+    response = submit_video(client, output_scale=scale)
+    assert response.status_code == 422
+    assert client.get("/api/jobs").json() == {"jobs": []}
+
+
+def test_quarter_scale_rejects_unsafe_short_edge(tmp_path):
+    client = make_client(tmp_path)
+    response = submit_video(client, output_scale="0.25")
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Target shortest edge must be at least 256 pixels"
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "scale", "detail"),
+    [
+        (4096, 2160, 2.0, "Target longest edge must not exceed 7680 pixels"),
+        (3840, 2162, 2.0, "Target pixel count must not exceed 33177600 pixels"),
+    ],
+)
+def test_target_dimensions_enforce_edge_and_pixel_ceiling(width, height, scale, detail):
+    with pytest.raises(ValueError, match=detail):
+        target_dimensions(width, height, scale)
 
 
 def test_upload_creates_a_persisted_job_with_public_contract_fields(tmp_path):
@@ -391,6 +472,125 @@ def test_configured_default_profile_is_used_when_upload_omits_preset(tmp_path, m
     assert response.status_code == 201
     assert response.json()["preset"] == "7b-fp8-experimental"
     assert response.json()["requires_preflight"] is True
+
+
+def test_config_exposes_output_scale_options_and_default(tmp_path):
+    client = make_client(tmp_path)
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json()["default_output_scale"] == 1.0
+    assert response.json()["output_scales"] == [
+        {
+            "value": 1.0,
+            "label": "1x Original",
+            "description": "Original dimensions; full generative restoration.",
+        },
+        {
+            "value": 0.5,
+            "label": "0.5x Balanced",
+            "description": (
+                "Half width and height; generative restoration with fewer output pixels."
+            ),
+        },
+        {
+            "value": 0.25,
+            "label": "0.25x Fast",
+            "description": "Quarter width and height; experimental generative restoration.",
+        },
+        {
+            "value": 2.0,
+            "label": "2x Upscale",
+            "description": "Double width and height; highest processing cost.",
+        },
+    ]
+
+
+def test_legacy_database_migrates_existing_jobs_as_2x(tmp_path):
+    database_path = tmp_path / "jobs.sqlite3"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                original_filename TEXT NOT NULL,
+                input_path TEXT NOT NULL,
+                output_path TEXT NOT NULL,
+                log_path TEXT NOT NULL,
+                preset TEXT NOT NULL,
+                color_correction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                output_filename TEXT,
+                error TEXT,
+                requires_preflight INTEGER NOT NULL,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                duration_seconds REAL NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL
+            )
+            """
+        )
+        rows = [
+            ("legacy", "completed", "completed"),
+            ("active-legacy", "running", "upscaling"),
+        ]
+        for job_id, status, stage in rows:
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    id, original_filename, input_path, output_path, log_path, preset,
+                    color_correction, status, progress, stage, created_at, updated_at,
+                    output_filename, error, requires_preflight, cancel_requested,
+                    duration_seconds, width, height
+                ) VALUES (?, ?, ?, ?, ?, '3b-safe', 'lab', ?, 50, ?, ?, ?, NULL, NULL, 0, 0, 1, 640, 360)
+                """,
+                (
+                    job_id,
+                    f"{job_id}.mp4",
+                    str(tmp_path / "inputs" / f"{job_id}.mp4"),
+                    str(tmp_path / "results" / f"{job_id}.mp4"),
+                    str(tmp_path / "logs" / f"{job_id}.log"),
+                    status,
+                    stage,
+                    "2026-08-12T00:00:00+00:00",
+                    "2026-08-12T00:00:00+00:00",
+                ),
+            )
+
+    store = JobStore(tmp_path)
+    store.initialize()
+    with sqlite3.connect(database_path) as connection:
+        schema_after_first = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()[0]
+        data_after_first = connection.execute(
+            "SELECT id, output_scale, target_width, target_height, frame_count, runtime_profile_fingerprint FROM jobs ORDER BY id"
+        ).fetchall()
+    store.initialize()
+
+    job = store.get("legacy")
+    assert job is not None
+    assert job.output_scale == 2.0
+    assert (job.target_width, job.target_height) == (1280, 720)
+    assert job.frame_count == 0
+    assert job.runtime_profile_fingerprint == "legacy:unknown"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()[0] == schema_after_first
+        assert connection.execute(
+            "SELECT id, output_scale, target_width, target_height, frame_count, runtime_profile_fingerprint FROM jobs ORDER BY id"
+        ).fetchall() == data_after_first
+
+    interrupted = store.recover_interrupted()
+    assert [job.id for job in interrupted] == ["active-legacy"]
+    recovered = store.get("active-legacy")
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.stage == "interrupted"
 
 
 def test_restart_marks_interrupted_job_failed_and_resumes_queued_work(tmp_path):

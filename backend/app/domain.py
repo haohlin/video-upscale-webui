@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,28 @@ from pathlib import Path
 PRESETS = frozenset({"3b-safe", "7b-fp8-experimental"})
 COLOR_CORRECTIONS = frozenset({"lab", "none"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+OUTPUT_SCALES = frozenset({0.25, 0.5, 1.0, 2.0})
+DEFAULT_OUTPUT_SCALE = 1.0
+MIN_TARGET_SHORT_SIDE = 256
+MAX_TARGET_EDGE = 7680
+MAX_TARGET_PIXELS = 33_177_600
+
+
+def _even_dimension(value: float) -> int:
+    return max(2, int(math.floor(value / 2.0 + 0.5)) * 2)
+
+
+def target_dimensions(width: int, height: int, scale: float) -> tuple[int, int]:
+    if scale not in OUTPUT_SCALES or width <= 0 or height <= 0:
+        raise ValueError("Unsupported output scale")
+    target = (_even_dimension(width * scale), _even_dimension(height * scale))
+    if min(target) < MIN_TARGET_SHORT_SIDE:
+        raise ValueError(f"Target shortest edge must be at least {MIN_TARGET_SHORT_SIDE} pixels")
+    if max(target) > MAX_TARGET_EDGE:
+        raise ValueError(f"Target longest edge must not exceed {MAX_TARGET_EDGE} pixels")
+    if target[0] * target[1] > MAX_TARGET_PIXELS:
+        raise ValueError(f"Target pixel count must not exceed {MAX_TARGET_PIXELS} pixels")
+    return target
 
 
 @dataclass(frozen=True)
@@ -35,6 +58,11 @@ class Job:
     log_path: Path
     preset: str
     color_correction: str
+    output_scale: float
+    target_width: int
+    target_height: int
+    frame_count: int
+    runtime_profile_fingerprint: str
     status: str
     progress: int
     stage: str
@@ -54,6 +82,11 @@ class Job:
             "original_filename": self.original_filename,
             "preset": self.preset,
             "color_correction": self.color_correction,
+            "output_scale": self.output_scale,
+            "target_width": self.target_width,
+            "target_height": self.target_height,
+            "frame_count": self.frame_count,
+            "runtime_profile_fingerprint": self.runtime_profile_fingerprint,
             "status": self.status,
             "progress": self.progress,
             "stage": self.stage,

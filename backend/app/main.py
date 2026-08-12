@@ -124,7 +124,37 @@ def create_app(
 
     @service.get("/api/config")
     def config() -> dict[str, object]:
-        return {"default_profile": settings.default_profile, "presets": ["3b-safe", "7b-fp8-experimental"]}
+        return {
+            "default_profile": settings.default_profile,
+            "presets": ["3b-safe", "7b-fp8-experimental"],
+            "default_output_scale": settings.default_output_scale,
+            "output_scales": [
+                {
+                    "value": 1.0,
+                    "label": "1x Original",
+                    "description": "Original dimensions; full generative restoration.",
+                },
+                {
+                    "value": 0.5,
+                    "label": "0.5x Balanced",
+                    "description": (
+                        "Half width and height; generative restoration with fewer output pixels."
+                    ),
+                },
+                {
+                    "value": 0.25,
+                    "label": "0.25x Fast",
+                    "description": (
+                        "Quarter width and height; experimental generative restoration."
+                    ),
+                },
+                {
+                    "value": 2.0,
+                    "label": "2x Upscale",
+                    "description": "Double width and height; highest processing cost.",
+                },
+            ],
+        }
 
     @service.get("/api/jobs")
     def list_jobs() -> dict[str, list[dict[str, object]]]:
@@ -135,8 +165,11 @@ def create_app(
         video: UploadFile = File(...),
         preset: str | None = Form(None),
         color_correction: str = Form("lab"),
+        output_scale: float | None = Form(None),
     ) -> dict[str, object]:
-        return (await jobs.create_job(video, preset, color_correction)).public_dict()
+        return (
+            await jobs.create_job(video, preset, color_correction, output_scale)
+        ).public_dict()
 
     @service.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:

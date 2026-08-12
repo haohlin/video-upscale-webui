@@ -123,7 +123,7 @@ from app.domain import target_dimensions
         (1920, 1080, 1.0, (1920, 1080)),
         (1920, 1080, 0.5, (960, 540)),
         (2160, 3840, 0.25, (540, 960)),
-        (641, 359, 0.5, (320, 180)),
+        (1281, 719, 0.5, (640, 360)),
         (1920, 1080, 2.0, (3840, 2160)),
     ],
 )
@@ -142,7 +142,11 @@ def test_upload_defaults_to_original_resolution_and_exposes_target_dimensions(tm
 
 @pytest.mark.parametrize("scale", ["0.25", "0.5", "1", "2"])
 def test_upload_accepts_fixed_output_scale_allowlist(tmp_path, scale):
-    client = make_client(tmp_path)
+    class ScaleProbe:
+        def inspect(self, path: Path) -> dict[str, float | int]:
+            return {"duration_seconds": 3.5, "width": 1920, "height": 1080}
+
+    client = make_client(tmp_path, probe=ScaleProbe())
     response = submit_video(client, output_scale=scale)
     assert response.status_code == 201
     assert response.json()["output_scale"] == float(scale)

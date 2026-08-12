@@ -20,31 +20,73 @@ class JobStore:
         for directory in (self.inputs, self.results, self.logs, self.staging):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY,
-                    original_filename TEXT NOT NULL,
-                    input_path TEXT NOT NULL,
-                    output_path TEXT NOT NULL,
-                    log_path TEXT NOT NULL,
-                    preset TEXT NOT NULL,
-                    color_correction TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    progress INTEGER NOT NULL,
-                    stage TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    output_filename TEXT,
-                    error TEXT,
-                    requires_preflight INTEGER NOT NULL,
-                    cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    duration_seconds REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL
+            connection.execute("BEGIN IMMEDIATE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+            ).fetchone()
+            if not table_exists:
+                connection.execute(
+                    """
+                    CREATE TABLE jobs (
+                        id TEXT PRIMARY KEY,
+                        original_filename TEXT NOT NULL,
+                        input_path TEXT NOT NULL,
+                        output_path TEXT NOT NULL,
+                        log_path TEXT NOT NULL,
+                        preset TEXT NOT NULL,
+                        color_correction TEXT NOT NULL,
+                        output_scale REAL NOT NULL,
+                        target_width INTEGER NOT NULL,
+                        target_height INTEGER NOT NULL,
+                        frame_count INTEGER NOT NULL,
+                        runtime_profile_fingerprint TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        progress INTEGER NOT NULL,
+                        stage TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        output_filename TEXT,
+                        error TEXT,
+                        requires_preflight INTEGER NOT NULL,
+                        cancel_requested INTEGER NOT NULL DEFAULT 0,
+                        duration_seconds REAL NOT NULL,
+                        width INTEGER NOT NULL,
+                        height INTEGER NOT NULL
+                    )
+                    """
                 )
-                """
-            )
+                connection.execute("PRAGMA user_version = 1")
+            elif version == 0:
+                columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(jobs)")
+                }
+                migrations = {
+                    "output_scale": (
+                        "ALTER TABLE jobs ADD COLUMN output_scale REAL NOT NULL DEFAULT 2.0"
+                    ),
+                    "target_width": (
+                        "ALTER TABLE jobs ADD COLUMN target_width INTEGER NOT NULL DEFAULT 0"
+                    ),
+                    "target_height": (
+                        "ALTER TABLE jobs ADD COLUMN target_height INTEGER NOT NULL DEFAULT 0"
+                    ),
+                    "frame_count": (
+                        "ALTER TABLE jobs ADD COLUMN frame_count INTEGER NOT NULL DEFAULT 0"
+                    ),
+                    "runtime_profile_fingerprint": (
+                        "ALTER TABLE jobs ADD COLUMN runtime_profile_fingerprint "
+                        "TEXT NOT NULL DEFAULT 'legacy:unknown'"
+                    ),
+                }
+                for name, statement in migrations.items():
+                    if name not in columns:
+                        connection.execute(statement)
+                connection.execute(
+                    "UPDATE jobs SET target_width = width * 2, target_height = height * 2 "
+                    "WHERE target_width = 0 OR target_height = 0"
+                )
+                connection.execute("PRAGMA user_version = 1")
 
     def create(
         self,
@@ -57,18 +99,25 @@ class JobStore:
         preset: str,
         color_correction: str,
         media: MediaInfo,
+        output_scale: float = 2.0,
+        target_width: int | None = None,
+        target_height: int | None = None,
+        runtime_profile_fingerprint: str = "legacy:unknown",
     ) -> Job:
         now = self._now()
         requires_preflight = preset == "7b-fp8-experimental"
+        target_width = target_width if target_width is not None else media.width * 2
+        target_height = target_height if target_height is not None else media.height * 2
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO jobs (
                     id, original_filename, input_path, output_path, log_path, preset,
-                    color_correction, status, progress, stage, created_at, updated_at,
-                    output_filename, error, requires_preflight, cancel_requested,
-                    duration_seconds, width, height
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, 'queued', ?, ?, NULL, NULL, ?, 0, ?, ?, ?)
+                    color_correction, output_scale, target_width, target_height,
+                    frame_count, runtime_profile_fingerprint, status, progress, stage,
+                    created_at, updated_at, output_filename, error, requires_preflight,
+                    cancel_requested, duration_seconds, width, height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 'queued', ?, ?, NULL, NULL, ?, 0, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -78,6 +127,11 @@ class JobStore:
                     str(log_path),
                     preset,
                     color_correction,
+                    output_scale,
+                    target_width,
+                    target_height,
+                    media.frame_count,
+                    runtime_profile_fingerprint,
                     now,
                     now,
                     int(requires_preflight),
@@ -271,6 +325,11 @@ class JobStore:
             log_path=Path(row["log_path"]),
             preset=row["preset"],
             color_correction=row["color_correction"],
+            output_scale=row["output_scale"],
+            target_width=row["target_width"],
+            target_height=row["target_height"],
+            frame_count=row["frame_count"],
+            runtime_profile_fingerprint=row["runtime_profile_fingerprint"],
             status=row["status"],
             progress=row["progress"],
             stage=row["stage"],
