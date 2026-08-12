@@ -1,24 +1,35 @@
 from __future__ import annotations
 
+import dataclasses
+import os
 import queue
 import re
 import shlex
-import os
 import signal
 import subprocess
 import threading
 import time
 from pathlib import Path
 from shutil import disk_usage
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 from .config import Settings
 from .domain import Job, PreflightLimits
+from .progress import ProgressReport, aggregate_progress, parse_progress_line
 
-ProgressReporter = Callable[[int, str], None]
+ProgressReporter = Callable[[ProgressReport], None]
 CancellationChecker = Callable[[], bool]
 OUTPUT_QUEUE_CHUNKS = 128
 MAX_OUTPUT_LINE_CHARS = 64 * 1024
+PROGRESS_REPORT_INTERVAL_SECONDS = 0.1
+TERMINAL_PROGRESS_EVENTS = frozenset(
+    {
+        "model_preparation_completed",
+        "chunk_completed",
+        "output_started",
+        "completed",
+    }
+)
 
 
 class JobCancelled(Exception):
@@ -94,7 +105,9 @@ class SubprocessRunner:
         preview_path = job.output_path.parent.parent / "staging" / f"{job.id}-preflight.mp4"
         preview_output = job.output_path.parent.parent / "staging" / f"{job.id}-preflight-output.mp4"
         try:
-            report_progress(2, "preflight-media")
+            report_progress(
+                ProgressReport(percent=2, stage="preflight-media", invocation="preflight")
+            )
             self._make_preview(job.input_path, preview_path, limits, is_cancelled)
             self._execute(
                 job,
@@ -156,8 +169,9 @@ class SubprocessRunner:
         self._run_process(
             command,
             None,
-            lambda _value, _stage: None,
+            lambda _report: None,
             is_cancelled,
+            invocation="preflight",
             monitored_paths=[output_path],
         )
 
@@ -167,7 +181,7 @@ class SubprocessRunner:
         *,
         input_path: Path,
         output_path: Path,
-        mode: str,
+        mode: Literal["preflight", "full"],
         report_progress: ProgressReporter,
         is_cancelled: CancellationChecker,
     ) -> None:
@@ -196,6 +210,7 @@ class SubprocessRunner:
             job.log_path,
             report_progress,
             is_cancelled,
+            invocation=mode,
             monitored_paths=[output_path, temporary_output],
         )
 
@@ -205,6 +220,8 @@ class SubprocessRunner:
         log_path: Path | None,
         report_progress: ProgressReporter,
         is_cancelled: CancellationChecker,
+        *,
+        invocation: Literal["preflight", "full"],
         monitored_paths: list[Path] | None = None,
     ) -> None:
         process = subprocess.Popen(
@@ -245,9 +262,14 @@ class SubprocessRunner:
         log_bytes_written = log_path.stat().st_size if log_path and log_path.exists() else 0
         process_stopped = False
         pending_output = ""
+        last_sequence = -1
+        last_seen_work_sequence = -1
+        last_legacy_percent = -1
+        last_nonterminal_report_at: float | None = None
 
         def consume_output_line(line: str) -> None:
-            nonlocal log_bytes_written
+            nonlocal last_legacy_percent, last_nonterminal_report_at
+            nonlocal last_seen_work_sequence, last_sequence, log_bytes_written
             line = line[:MAX_OUTPUT_LINE_CHARS]
             if log_file and log_bytes_written < self._settings.max_job_log_bytes:
                 remaining = self._settings.max_job_log_bytes - log_bytes_written
@@ -256,9 +278,42 @@ class SubprocessRunner:
                 log_file.write(persisted)
                 log_file.flush()
                 log_bytes_written += len(persisted.encode("utf-8"))
-            match = self._progress_pattern.match(line.strip())
+            stripped = line.strip()
+            event = parse_progress_line(stripped)
+            if event is not None:
+                if event.sequence <= last_sequence:
+                    return
+                last_sequence = event.sequence
+                now = time.monotonic()
+                is_terminal = event.event_type in TERMINAL_PROGRESS_EVENTS
+                if (
+                    not is_terminal
+                    and last_nonterminal_report_at is not None
+                    and now - last_nonterminal_report_at < PROGRESS_REPORT_INTERVAL_SECONDS
+                ):
+                    return
+                if not is_terminal:
+                    last_nonterminal_report_at = now
+                last_seen_work_sequence = max(last_seen_work_sequence, event.work_sequence)
+                report_progress(
+                    dataclasses.replace(aggregate_progress(event), invocation=invocation)
+                )
+                return
+
+            match = self._progress_pattern.match(stripped)
             if match:
-                report_progress(int(match.group(1)), match.group(2) or "processing")
+                percent = int(match.group(1))
+                last_seen_work_sequence += 1
+                report_progress(
+                    ProgressReport(
+                        percent=percent,
+                        stage=match.group(2) or "processing",
+                        invocation=invocation,
+                        work_sequence=last_seen_work_sequence,
+                        measured_work=percent > last_legacy_percent,
+                    )
+                )
+                last_legacy_percent = max(last_legacy_percent, percent)
 
         try:
             while True:

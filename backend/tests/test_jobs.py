@@ -12,6 +12,7 @@ from app.domain import MediaInfo, target_dimensions
 from app.job_service import JobService
 from app.job_store import JobStore
 from app.main import create_app
+from app.progress import ProgressReport
 
 
 class ValidProbe:
@@ -28,11 +29,13 @@ class CompletedRunner:
     def preflight(self, job, limits, report_progress, is_cancelled):
         assert limits.max_duration_seconds == 10
         assert limits.max_height == 480
-        report_progress(20, "preflight")
+        report_progress(
+            ProgressReport(percent=20, stage="preflight", invocation="preflight")
+        )
 
     def run(self, job, report_progress, is_cancelled):
         Path(job.output_path).write_bytes(b"mp4-result")
-        report_progress(100, "encoding")
+        report_progress(ProgressReport(percent=100, stage="encoding", invocation="full"))
 
 
 class BlockingRunner:
@@ -81,7 +84,13 @@ class FullRunAfterCompletedPreflightRunner(CompletedRunner):
         self.release = threading.Event()
 
     def preflight(self, job, limits, report_progress, is_cancelled):
-        report_progress(100, "preflight-complete")
+        report_progress(
+            ProgressReport(
+                percent=100,
+                stage="preflight-complete",
+                invocation="preflight",
+            )
+        )
 
     def run(self, job, report_progress, is_cancelled):
         self.full_run_started.set()

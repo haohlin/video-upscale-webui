@@ -1,4 +1,5 @@
 import io
+import json
 import signal
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import pytest
 from app.config import Settings
 from app.domain import Job
 from app.media import MAX_PROBE_OUTPUT_BYTES, SubprocessMediaProbe
+from app.progress import ProgressReport
 from app.runner import JobCancelled, SubprocessRunner
 
 
@@ -39,8 +41,8 @@ def test_runner_streams_short_progress_before_child_exit(tmp_path):
     cancel = threading.Event()
     worker_error: list[BaseException] = []
 
-    def report_progress(percent: int, stage: str) -> None:
-        if (percent, stage) == (5, "loading"):
+    def report_progress(report: ProgressReport) -> None:
+        if (report.percent, report.stage) == (5, "loading"):
             progress_seen.set()
 
     def run() -> None:
@@ -54,6 +56,7 @@ def test_runner_streams_short_progress_before_child_exit(tmp_path):
                 None,
                 report_progress,
                 cancel.is_set,
+                invocation="full",
             )
         except JobCancelled:
             pass
@@ -70,6 +73,142 @@ def test_runner_streams_short_progress_before_child_exit(tmp_path):
 
     assert not thread.is_alive()
     assert worker_error == []
+
+
+def test_structured_progress_sequence_and_rate_limit_are_scoped_per_invocation(tmp_path):
+    """Sequence regression or event floods must not cross invocation boundaries."""
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("# adapter\n")
+    settings = Settings(
+        project_root=tmp_path,
+        runtime_root=tmp_path,
+        data_root=tmp_path,
+        seedvr2_cli=str(adapter),
+        seedvr2_model_dir=tmp_path,
+        python=sys.executable,
+        app_port=8765,
+        disk_reserve_gb=0,
+        default_profile="3b-safe",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+    )
+    (tmp_path / settings.seedvr2_3b_model).write_bytes(b"model")
+    (tmp_path / settings.seedvr2_vae_model).write_bytes(b"vae")
+    runner = SubprocessRunner(settings)
+
+    def event(sequence, event_type="heartbeat"):
+        return "EVENT " + json.dumps(
+            {
+                "schema_version": 1,
+                "sequence": sequence,
+                "work_sequence": 0,
+                "measured_work": False,
+                "event_type": event_type,
+                "elapsed_seconds": 1.0,
+            }
+        )
+
+    preflight_lines = [event(2, "output_started"), event(1)]
+    preflight_lines.extend(event(sequence) for sequence in range(3, 23))
+
+    class Process:
+        pid = 1234
+        returncode = 0
+
+        def __init__(self, lines):
+            self.stdout = io.StringIO("\n".join(lines) + "\n")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    reports: list[ProgressReport] = []
+    with patch(
+        "app.runner.subprocess.Popen",
+        side_effect=[Process(preflight_lines), Process([event(1)])],
+    ), patch("app.runner.time.monotonic", return_value=100.0):
+        runner._run_process(
+            ["adapter"],
+            None,
+            reports.append,
+            lambda: False,
+            invocation="preflight",
+        )
+        runner._run_process(
+            ["adapter"],
+            None,
+            reports.append,
+            lambda: False,
+            invocation="full",
+        )
+
+    assert [(report.invocation, report.event.sequence) for report in reports] == [
+        ("preflight", 2),
+        ("preflight", 3),
+        ("full", 1),
+    ]
+
+
+def test_legacy_progress_continues_work_sequence_after_structured_progress(tmp_path):
+    """Legacy finalization reports must remain ordered after fork measured work."""
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("# adapter\n")
+    settings = Settings(
+        project_root=tmp_path,
+        runtime_root=tmp_path,
+        data_root=tmp_path,
+        seedvr2_cli=str(adapter),
+        seedvr2_model_dir=tmp_path,
+        python=sys.executable,
+        app_port=8765,
+        disk_reserve_gb=0,
+        default_profile="3b-safe",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+    )
+    (tmp_path / settings.seedvr2_3b_model).write_bytes(b"model")
+    (tmp_path / settings.seedvr2_vae_model).write_bytes(b"vae")
+    runner = SubprocessRunner(settings)
+    structured = "EVENT " + json.dumps(
+        {
+            "schema_version": 1,
+            "sequence": 7,
+            "work_sequence": 5,
+            "measured_work": False,
+            "event_type": "output_started",
+            "elapsed_seconds": 12.5,
+        }
+    )
+
+    class Process:
+        pid = 1234
+        returncode = 0
+        stdout = io.StringIO(
+            structured
+            + "\nPROGRESS 92 finalizing\nPROGRESS 92 finalizing\nPROGRESS 93 finalizing\n"
+        )
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    reports: list[ProgressReport] = []
+    with patch("app.runner.subprocess.Popen", return_value=Process()):
+        runner._run_process(
+            ["adapter"],
+            None,
+            reports.append,
+            lambda: False,
+            invocation="full",
+        )
+
+    assert [report.work_sequence for report in reports] == [5, 6, 7, 8]
+    assert [report.measured_work for report in reports] == [False, True, False, True]
+    assert [report.percent for report in reports] == [91, 92, 92, 93]
 
 
 def test_runner_refuses_to_advertise_ready_before_default_model_is_present(tmp_path):
@@ -137,7 +276,13 @@ def test_cancellation_terminates_and_kills_adapter_process_group_before_returnin
         "app.runner.os.killpg"
     ) as killpg:
         with pytest.raises(JobCancelled):
-            runner._run_process(["adapter"], None, lambda _percent, _stage: None, lambda: True)
+            runner._run_process(
+                ["adapter"],
+                None,
+                lambda _report: None,
+                lambda: True,
+                invocation="full",
+            )
 
     assert popen.call_args.kwargs["start_new_session"] is True
     assert killpg.call_args_list == [
@@ -260,7 +405,7 @@ def test_runner_passes_selected_output_scale_to_adapter(tmp_path):
             input_path=job.input_path,
             output_path=job.output_path,
             mode="full",
-            report_progress=lambda _percent, _stage: None,
+            report_progress=lambda _report: None,
             is_cancelled=lambda: False,
         )
 
@@ -304,7 +449,13 @@ def test_runner_wait_uses_configured_processing_deadline(tmp_path):
             return 0
 
     with patch("app.runner.subprocess.Popen", return_value=Process()):
-        runner._run_process(["adapter"], None, lambda _percent, _stage: None, lambda: False)
+        runner._run_process(
+            ["adapter"],
+            None,
+            lambda _report: None,
+            lambda: False,
+            invocation="full",
+        )
 
 
 def test_runner_caps_persisted_adapter_log(tmp_path):
@@ -342,7 +493,13 @@ def test_runner_caps_persisted_adapter_log(tmp_path):
             return 0
 
     with patch("app.runner.subprocess.Popen", return_value=Process()):
-        runner._run_process(["adapter"], log_path, lambda _percent, _stage: None, lambda: False)
+        runner._run_process(
+            ["adapter"],
+            log_path,
+            lambda _report: None,
+            lambda: False,
+            invocation="full",
+        )
 
     assert log_path.stat().st_size <= 32
 
@@ -382,7 +539,13 @@ def test_runner_uses_bounded_output_queue(tmp_path):
     with patch("app.runner.subprocess.Popen", return_value=Process()), patch(
         "app.runner.queue.Queue", wraps=__import__("queue").Queue
     ) as queue_type:
-        runner._run_process(["adapter"], None, lambda _percent, _stage: None, lambda: False)
+        runner._run_process(
+            ["adapter"],
+            None,
+            lambda _report: None,
+            lambda: False,
+            invocation="full",
+        )
 
     assert queue_type.call_args.kwargs["maxsize"] > 0
 
@@ -430,7 +593,13 @@ def test_runner_joins_output_collector_after_cancellation(tmp_path):
         runner, "_stop_process_group"
     ), patch("app.runner.threading.Thread", side_effect=make_thread):
         with pytest.raises(JobCancelled):
-            runner._run_process(["adapter"], None, lambda _percent, _stage: None, lambda: True)
+            runner._run_process(
+                ["adapter"],
+                None,
+                lambda _report: None,
+                lambda: True,
+                invocation="full",
+            )
 
     assert len(collectors) == 1
     assert not collectors[0].is_alive()
@@ -474,8 +643,9 @@ def test_runner_stops_process_when_artifact_budget_is_exhausted(tmp_path):
             runner._run_process(
                 ["adapter"],
                 None,
-                lambda _percent, _stage: None,
+                lambda _report: None,
                 lambda: False,
+                invocation="full",
                 monitored_paths=[tmp_path / "output.mp4"],
             )
 

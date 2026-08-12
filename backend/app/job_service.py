@@ -219,7 +219,9 @@ class JobService:
                 return
 
     def _run_job(self, job: Job) -> None:
-        report_progress = lambda percent, stage: self.store.update_progress(job.id, percent, stage)
+        report_progress = lambda report: self.store.update_progress(
+            job.id, report.percent, report.stage
+        )
         is_cancelled = lambda: self.store.cancellation_requested(job.id)
         try:
             if not self.has_disk_reserve():
