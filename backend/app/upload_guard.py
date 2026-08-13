@@ -26,6 +26,7 @@ class UploadBodyGuard:
         app: ASGIApp,
         *,
         max_body_bytes: int,
+        max_chunk_bytes: int = 4 * 1024 * 1024,
         has_disk_reserve: Callable[[], bool],
         has_queue_capacity: Callable[[], bool] | None = None,
         upload_idle_timeout_seconds: float = 30,
@@ -33,6 +34,7 @@ class UploadBodyGuard:
     ) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
+        self.max_chunk_bytes = max_chunk_bytes
         self.has_disk_reserve = has_disk_reserve
         self.has_queue_capacity = has_queue_capacity or (lambda: True)
         self.upload_idle_timeout_seconds = upload_idle_timeout_seconds
@@ -40,7 +42,8 @@ class UploadBodyGuard:
         self._upload_active = False
 
     async def __call__(self, scope: dict[str, Any], receive: Receive, send: Send) -> None:
-        if not self._is_job_upload(scope):
+        upload_limit = self._upload_limit(scope)
+        if upload_limit is None:
             await self.app(scope, receive, send)
             return
         if self._upload_active:
@@ -53,7 +56,7 @@ class UploadBodyGuard:
             await self._reject(send, 507, "Insufficient free disk space for upload")
             return
         try:
-            self._validate_content_length(scope)
+            self._validate_content_length(scope, upload_limit)
         except UploadGuardError as error:
             await self._reject(send, error.status, error.detail)
             return
@@ -77,7 +80,7 @@ class UploadBodyGuard:
                 raise UploadGuardError(408, "Upload timed out") from error
             if message.get("type") == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_body_bytes:
+                if received > upload_limit:
                     raise UploadGuardError(413, "Upload exceeds configured size limit")
             return message
 
@@ -90,15 +93,16 @@ class UploadBodyGuard:
         finally:
             self._upload_active = False
 
-    @staticmethod
-    def _is_job_upload(scope: dict[str, Any]) -> bool:
-        return (
-            scope.get("type") == "http"
-            and scope.get("method") == "POST"
-            and scope.get("path") == "/api/jobs"
-        )
+    def _upload_limit(self, scope: dict[str, Any]) -> int | None:
+        if scope.get("type") != "http":
+            return None
+        if scope.get("method") == "POST" and scope.get("path") == "/api/jobs":
+            return self.max_body_bytes
+        if scope.get("method") == "PUT" and scope.get("path", "").startswith("/api/uploads/"):
+            return self.max_chunk_bytes
+        return None
 
-    def _validate_content_length(self, scope: dict[str, Any]) -> None:
+    def _validate_content_length(self, scope: dict[str, Any], maximum: int) -> None:
         for name, value in scope.get("headers", []):
             if name.lower() != b"content-length":
                 continue
@@ -108,7 +112,7 @@ class UploadBodyGuard:
                 raise UploadGuardError(400, "Invalid Content-Length") from error
             if content_length < 0:
                 raise UploadGuardError(400, "Invalid Content-Length")
-            if content_length > self.max_body_bytes:
+            if content_length > maximum:
                 raise UploadGuardError(413, "Upload exceeds configured size limit")
             return
 

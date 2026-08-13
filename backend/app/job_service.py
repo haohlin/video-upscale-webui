@@ -59,41 +59,27 @@ class JobService:
         color_correction: str,
         output_scale: float | None,
     ) -> Job:
-        preset = preset or self.settings.default_profile
-        if preset not in PRESETS:
-            raise HTTPException(422, "Unsupported processing preset")
-        if color_correction not in COLOR_CORRECTIONS:
-            raise HTTPException(422, "Unsupported color correction")
-        output_scale = (
-            self.settings.default_output_scale if output_scale is None else output_scale
-        )
-        if output_scale not in OUTPUT_SCALES:
-            raise HTTPException(422, "Unsupported output scale")
         original_filename = upload.filename or "upload"
-        suffix = Path(original_filename).suffix.lower()
-        if suffix not in ALLOWED_SUFFIXES:
-            raise HTTPException(415, "Supported video formats: MP4, MOV, MKV, AVI, WebM")
+        upload_size = upload.size if isinstance(upload.size, int) and upload.size >= 0 else self.settings.max_upload_bytes
+        suffix = self._validate_submission_options(
+            original_filename, preset, color_correction, output_scale
+        )[3]
         if not self.has_queue_capacity():
             raise HTTPException(429, "Processing queue is full")
         self.require_disk_reserve("Insufficient free disk space for upload")
-        upload_size = upload.size if isinstance(upload.size, int) and upload.size >= 0 else self.settings.max_upload_bytes
         self.require_upload_capacity(upload_size)
-
         job_id = str(uuid.uuid4())
         input_path = self.store.inputs / f"{job_id}{suffix}"
         try:
             await self._stream_upload(upload, input_path)
-            media = normalize_media_info(await asyncio.to_thread(self.media_probe.inspect, input_path))
-            self._validate_media(
-                media.duration_seconds,
-                media.width,
-                media.height,
-                media.frame_rate,
-                media.frame_count,
-                media.format_name,
-            )
-            target_width, target_height = target_dimensions(
-                media.width, media.height, output_scale
+            return await self._create_job_from_staged_file(
+                input_path,
+                original_filename=original_filename,
+                total_bytes=upload_size,
+                preset=preset,
+                color_correction=color_correction,
+                output_scale=output_scale,
+                move_staged_file=False,
             )
         except HTTPException:
             input_path.unlink(missing_ok=True)
@@ -107,6 +93,73 @@ class JobService:
         finally:
             await upload.close()
 
+    async def create_job_from_staged_file(
+        self,
+        path: Path,
+        *,
+        original_filename: str,
+        total_bytes: int,
+        preset: str | None,
+        color_correction: str,
+        output_scale: float | None,
+    ) -> Job:
+        """Validate an accepted resumable upload through the normal job path."""
+        return await self._create_job_from_staged_file(
+            path,
+            original_filename=original_filename,
+            total_bytes=total_bytes,
+            preset=preset,
+            color_correction=color_correction,
+            output_scale=output_scale,
+            move_staged_file=True,
+        )
+
+    async def _create_job_from_staged_file(
+        self,
+        path: Path,
+        *,
+        original_filename: str,
+        total_bytes: int,
+        preset: str | None,
+        color_correction: str,
+        output_scale: float | None,
+        move_staged_file: bool,
+    ) -> Job:
+        preset, color_correction, output_scale, suffix = self._validate_submission_options(
+            original_filename, preset, color_correction, output_scale
+        )
+        if not self.has_queue_capacity():
+            raise HTTPException(429, "Processing queue is full")
+        self.require_disk_reserve("Insufficient free disk space for upload")
+        if not move_staged_file:
+            self.require_upload_capacity(total_bytes)
+        try:
+            media = normalize_media_info(await asyncio.to_thread(self.media_probe.inspect, path))
+            self._validate_media(
+                media.duration_seconds,
+                media.width,
+                media.height,
+                media.frame_rate,
+                media.frame_count,
+                media.format_name,
+            )
+            target_width, target_height = target_dimensions(
+                media.width, media.height, output_scale
+            )
+        except HTTPException:
+            raise
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+        job_id = str(uuid.uuid4()) if move_staged_file else path.stem
+        input_path = self.store.inputs / f"{job_id}{suffix}" if move_staged_file else path
+        try:
+            if move_staged_file:
+                # Same data root: hard-link keeps retryable session bytes until acceptance.
+                input_path.hardlink_to(path)
+        except OSError as error:
+            input_path.unlink(missing_ok=True)
+            raise RuntimeError("Could not prepare uploaded video") from error
         runtime_profile_fingerprint = (
             f"seedvr2:{preset}:{self.settings.device_backend_class}:"
             f"scale={output_scale:g}:batch=5:chunk=25:overlap=4:"
@@ -128,6 +181,26 @@ class JobService:
         )
         self._ensure_worker()
         return job
+
+    def _validate_submission_options(
+        self,
+        original_filename: str,
+        preset: str | None,
+        color_correction: str,
+        output_scale: float | None,
+    ) -> tuple[str, str, float, str]:
+        preset = preset or self.settings.default_profile
+        if preset not in PRESETS:
+            raise HTTPException(422, "Unsupported processing preset")
+        if color_correction not in COLOR_CORRECTIONS:
+            raise HTTPException(422, "Unsupported color correction")
+        output_scale = self.settings.default_output_scale if output_scale is None else output_scale
+        if type(output_scale) not in {int, float} or output_scale not in OUTPUT_SCALES:
+            raise HTTPException(422, "Unsupported output scale")
+        suffix = Path(original_filename).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            raise HTTPException(415, "Supported video formats: MP4, MOV, MKV, AVI, WebM")
+        return preset, color_correction, float(output_scale), suffix
 
     def has_disk_reserve(self) -> bool:
         try:

@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -13,6 +13,7 @@ from .job_store import JobStore
 from .media import MediaProbe, SubprocessMediaProbe
 from .runner import RunnerConfigurationError, SubprocessRunner, UnavailableRunner, VideoRunner
 from .upload_guard import UploadBodyGuard
+from .upload_sessions import UploadSessionError, UploadSessionService
 
 
 def create_app(
@@ -44,11 +45,14 @@ def create_app(
         except RunnerConfigurationError as error:
             runner = UnavailableRunner(str(error))
     jobs = JobService(settings, store, probe, runner, free_space_bytes=free_space_bytes)
+    uploads = UploadSessionService(settings)
     service = FastAPI(title="Video Upscale WebUI API")
     service.state.job_service = jobs
+    service.state.upload_session_service = uploads
     service.add_middleware(
         UploadBodyGuard,
         max_body_bytes=settings.max_upload_bytes,
+        max_chunk_bytes=4 * 1024 * 1024,
         has_disk_reserve=jobs.has_disk_reserve,
         has_queue_capacity=jobs.has_queue_capacity,
         upload_idle_timeout_seconds=settings.upload_idle_timeout_seconds,
@@ -168,6 +172,86 @@ def create_app(
         return jobs.public_job(
             await jobs.create_job(video, preset, color_correction, output_scale)
         )
+
+    def upload_error(error: UploadSessionError) -> HTTPException:
+        return HTTPException(error.status_code, error.detail)
+
+    @service.post("/api/uploads", status_code=201)
+    def create_upload(payload: dict[str, object]) -> dict[str, object]:
+        filename = payload.get("filename")
+        total_bytes = payload.get("total_bytes")
+        options = payload.get("options")
+        if type(total_bytes) is int:
+            if not jobs.has_queue_capacity():
+                raise HTTPException(429, "Processing queue is full")
+            jobs.require_disk_reserve("Insufficient free disk space for upload")
+            jobs.require_upload_capacity(total_bytes)
+        try:
+            return uploads.create(
+                filename=filename,  # type: ignore[arg-type]
+                total_bytes=total_bytes,  # type: ignore[arg-type]
+                options=options,  # type: ignore[arg-type]
+            )
+        except UploadSessionError as error:
+            raise upload_error(error) from error
+
+    @service.get("/api/uploads/{upload_id}")
+    def get_upload(upload_id: str) -> dict[str, object]:
+        try:
+            return uploads.status(upload_id)
+        except UploadSessionError as error:
+            raise upload_error(error) from error
+
+    @service.put("/api/uploads/{upload_id}")
+    async def append_upload(
+        upload_id: str,
+        request: Request,
+        upload_offset: str | None = Header(None, alias="Upload-Offset"),
+    ) -> dict[str, object]:
+        try:
+            offset = int(upload_offset) if upload_offset is not None else -1
+        except ValueError:
+            offset = -1
+        try:
+            return uploads.append(upload_id, offset=offset, data=await request.body())
+        except UploadSessionError as error:
+            raise upload_error(error) from error
+
+    @service.post("/api/uploads/{upload_id}/finalize", status_code=201)
+    async def finalize_upload(upload_id: str) -> dict[str, object]:
+        try:
+            finalized = uploads.finalize(upload_id)
+            options = finalized.options
+            job = await jobs.create_job_from_staged_file(
+                finalized.path,
+                original_filename=finalized.filename,
+                total_bytes=finalized.total_bytes,
+                preset=options.get("preset"),  # type: ignore[arg-type]
+                color_correction=options.get("color_correction", "lab"),  # type: ignore[arg-type]
+                output_scale=options.get("output_scale"),  # type: ignore[arg-type]
+            )
+        except UploadSessionError as error:
+            raise upload_error(error) from error
+        except HTTPException as error:
+            if error.status_code in {415, 422}:
+                uploads.discard(upload_id)
+            raise
+        except Exception:
+            raise HTTPException(503, "Could not validate staged upload") from None
+        try:
+            uploads.discard(upload_id)
+        except UploadSessionError:
+            # Job has already been accepted; session cleanup will retry on restart.
+            pass
+        return jobs.public_job(job)
+
+    @service.delete("/api/uploads/{upload_id}", status_code=204)
+    def discard_upload(upload_id: str) -> Response:
+        try:
+            uploads.discard(upload_id)
+        except UploadSessionError as error:
+            raise upload_error(error) from error
+        return Response(status_code=204)
 
     @service.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
