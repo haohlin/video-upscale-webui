@@ -114,6 +114,50 @@ def test_official_command_opts_into_jsonl_progress(tmp_path):
     assert command[command.index("--progress_format") + 1] == "jsonl"
 
 
+@pytest.mark.parametrize(
+    ("preset", "model_env", "expected_flags"),
+    [
+        ("3b-fp8-fast", "VIDEO_UPSCALE_SEEDVR2_3B_MODEL", {"--cuda_device": "0"}),
+        (
+            "7b-fp8-quality",
+            "VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL",
+            {
+                "--cuda_device": "0",
+                "--dit_offload_device": "cpu",
+                "--vae_offload_device": "cpu",
+                "--blocks_to_swap": "32",
+            },
+        ),
+    ],
+)
+def test_cuda_profiles_use_persistent_models_and_bounded_4090_flags(
+    tmp_path, preset, model_env, expected_flags
+):
+    adapter = load_adapter()
+    assert adapter.PRESETS[preset] == model_env
+
+    command = adapter.build_seedvr2_command(
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "out.mp4",
+        model_dir=tmp_path / "persistent-models",
+        model_name="model.safetensors",
+        preset=preset,
+        color_correction="lab",
+        source_width=1920,
+        source_height=1080,
+        output_scale=1.0,
+        python="python",
+        official_cli=tmp_path / "inference_cli.py",
+    )
+
+    assert command[command.index("--model_dir") + 1] == str(tmp_path / "persistent-models")
+    assert "--cache_dit" in command
+    assert "--cache_vae" in command
+    assert command[command.index("--attention_mode") + 1] == "sdpa"
+    for flag, value in expected_flags.items():
+        assert command[command.index(flag) + 1] == value
+
+
 def test_adapter_bridges_only_safe_fork_json_events(capsys):
     adapter = load_adapter()
     safe = json.dumps(

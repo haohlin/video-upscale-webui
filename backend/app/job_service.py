@@ -162,10 +162,15 @@ class JobService:
         except OSError as error:
             input_path.unlink(missing_ok=True)
             raise RuntimeError("Could not prepare uploaded video") from error
+        cuda_profile = (
+            ":cuda=0:attention=sdpa:offload=cpu"
+            if self.settings.device_backend_class == "nvidia-cuda"
+            else ""
+        )
         runtime_profile_fingerprint = (
             f"seedvr2:{preset}:{self.settings.device_backend_class}:"
             f"scale={output_scale:g}:batch=5:chunk=25:overlap=4:"
-            "dit_cache=enabled:vae_cache=enabled"
+            f"dit_cache=enabled:vae_cache=enabled{cuda_profile}"
         )
         try:
             job = self.store.create(

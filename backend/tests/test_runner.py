@@ -17,6 +17,26 @@ from app.progress import ProgressReport
 from app.runner import JobCancelled, SubprocessRunner
 
 
+def test_runner_maps_cuda_presets_to_existing_persistent_model_names(tmp_path):
+    settings = Settings(
+        project_root=tmp_path,
+        runtime_root=tmp_path,
+        data_root=tmp_path,
+        seedvr2_cli=str(tmp_path / "adapter.py"),
+        seedvr2_model_dir=tmp_path / "models",
+        python=sys.executable,
+        app_port=8765,
+        disk_reserve_gb=0,
+        default_profile="7b-fp8-quality",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+        device_backend_class="nvidia-cuda",
+    )
+
+    assert SubprocessRunner._model_for_preset(settings, "7b-fp8-quality") == settings.seedvr2_7b_fp8_model
+    assert SubprocessRunner._model_for_preset(settings, "3b-fp8-fast") == settings.seedvr2_3b_model
+
+
 def test_runner_streams_short_progress_before_child_exit(tmp_path):
     """Waiting for an 8 KiB buffer must not hide live progress from the UI."""
     adapter = tmp_path / "adapter.py"

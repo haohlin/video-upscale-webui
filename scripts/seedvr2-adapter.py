@@ -17,6 +17,8 @@ from pathlib import Path
 PRESETS = {
     "3b-safe": "VIDEO_UPSCALE_SEEDVR2_3B_MODEL",
     "7b-fp8-experimental": "VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL",
+    "3b-fp8-fast": "VIDEO_UPSCALE_SEEDVR2_3B_MODEL",
+    "7b-fp8-quality": "VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL",
 }
 
 PROFILE_PARAMETERS = {
@@ -26,6 +28,16 @@ PROFILE_PARAMETERS = {
         "temporal_overlap": "4",
     },
     "7b-fp8-experimental": {
+        "batch_size": "5",
+        "chunk_size": "25",
+        "temporal_overlap": "4",
+    },
+    "3b-fp8-fast": {
+        "batch_size": "5",
+        "chunk_size": "25",
+        "temporal_overlap": "4",
+    },
+    "7b-fp8-quality": {
         "batch_size": "5",
         "chunk_size": "25",
         "temporal_overlap": "4",
@@ -542,7 +554,7 @@ def build_seedvr2_command(
 ) -> list[str]:
     parameters = PROFILE_PARAMETERS[preset]
     resolution = target_short_side(source_width, source_height, output_scale)
-    return [
+    command = [
         python,
         str(official_cli),
         str(input_path),
@@ -575,6 +587,22 @@ def build_seedvr2_command(
         "--vae_encode_tiled",
         "--vae_decode_tiled",
     ]
+    if preset in {"3b-fp8-fast", "7b-fp8-quality"}:
+        command.extend(
+            [
+                "--cuda_device",
+                "0",
+                "--attention_mode",
+                "sdpa",
+                "--dit_offload_device",
+                "cpu",
+                "--vae_offload_device",
+                "cpu",
+            ]
+        )
+    if preset == "7b-fp8-quality":
+        command.extend(["--blocks_to_swap", "32", "--swap_io_components"])
+    return command
 
 
 def main() -> int:

@@ -418,9 +418,9 @@ class SubprocessRunner:
 
     @staticmethod
     def _model_for_preset(settings: Settings, preset: str) -> str:
-        if preset == "3b-safe":
+        if preset in {"3b-safe", "3b-fp8-fast"}:
             return settings.seedvr2_3b_model
-        if preset == "7b-fp8-experimental":
+        if preset in {"7b-fp8-experimental", "7b-fp8-quality"}:
             return settings.seedvr2_7b_fp8_model
         raise RunnerConfigurationError(f"Unsupported SeedVR2 preset: {preset}")
 
