@@ -16,6 +16,8 @@ from .config import Settings
 
 
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
+MAX_SESSION_METADATA_BYTES = 64 * 1024
+MAX_SESSION_OPTIONS_BYTES = 32 * 1024
 
 
 class UploadSessionError(Exception):
@@ -48,7 +50,7 @@ class UploadSessionService:
         self.settings = settings
         self.staging = settings.data_root / "staging"
         self._now = now or (lambda: datetime.now(UTC))
-        self._append_lock = threading.Lock()
+        self._session_lock = threading.RLock()
         self.staging.mkdir(parents=True, exist_ok=True)
 
     def create(
@@ -62,42 +64,44 @@ class UploadSessionService:
             raise UploadSessionError(413, "Upload exceeds configured size limit")
         normalized_filename = self._normalize_filename(filename)
         normalized_options = self._normalize_options(options)
-        self._cleanup_expired()
-        for _ in range(10):
-            session_id = secrets.token_urlsafe(32)
-            data_path = self._data_path(session_id)
-            try:
-                self._create_empty_file(data_path)
-            except FileExistsError:
-                continue
-            expires_at = self._utc_now() + timedelta(
-                seconds=self.settings.upload_session_ttl_seconds
-            )
-            record = {
-                "id": session_id,
-                "filename": normalized_filename,
-                "total_bytes": total_bytes,
-                "accepted_bytes": 0,
-                "expires_at": expires_at.isoformat(),
-                "options": normalized_options,
-            }
-            try:
-                self._write_metadata(session_id, record)
-            except Exception:
-                data_path.unlink(missing_ok=True)
-                raise
-            return self._public(record)
+        with self._session_lock:
+            self._cleanup_expired()
+            for _ in range(10):
+                session_id = secrets.token_urlsafe(32)
+                data_path = self._data_path(session_id)
+                try:
+                    self._create_empty_file(data_path)
+                except FileExistsError:
+                    continue
+                expires_at = self._utc_now() + timedelta(
+                    seconds=self.settings.upload_session_ttl_seconds
+                )
+                record = {
+                    "id": session_id,
+                    "filename": normalized_filename,
+                    "total_bytes": total_bytes,
+                    "accepted_bytes": 0,
+                    "expires_at": expires_at.isoformat(),
+                    "options": normalized_options,
+                }
+                try:
+                    self._write_metadata(session_id, record)
+                except Exception:
+                    data_path.unlink(missing_ok=True)
+                    raise
+                return self._public(record)
         raise RuntimeError("Could not allocate upload session")
 
     def status(self, session_id: str) -> dict[str, object]:
-        return self._public(self._load(session_id))
+        with self._session_lock:
+            return self._public(self._load(session_id))
 
     def append(self, session_id: str, *, offset: int, data: bytes) -> dict[str, object]:
         if type(offset) is not int or offset < 0:
             raise UploadSessionError(400, "Upload offset is invalid")
         if not isinstance(data, bytes) or not data:
             raise UploadSessionError(400, "Upload chunk is empty or invalid")
-        with self._append_lock:
+        with self._session_lock:
             record = self._load(session_id)
             accepted = self._integer(record, "accepted_bytes")
             total = self._integer(record, "total_bytes")
@@ -111,26 +115,28 @@ class UploadSessionService:
             return self._public(record)
 
     def finalize(self, session_id: str) -> FinalizedUpload:
-        record = self._load(session_id)
-        accepted = self._integer(record, "accepted_bytes")
-        total = self._integer(record, "total_bytes")
-        if accepted != total:
-            raise UploadSessionError(409, "Upload is incomplete")
-        path = self._data_path(session_id)
-        self._verify_data_file(path, accepted)
-        return FinalizedUpload(
-            id=session_id,
-            filename=self._string(record, "filename"),
-            total_bytes=total,
-            accepted_bytes=accepted,
-            expires_at=self._string(record, "expires_at"),
-            path=path,
-            options=dict(record.get("options", {})),
-        )
+        with self._session_lock:
+            record = self._load(session_id)
+            accepted = self._integer(record, "accepted_bytes")
+            total = self._integer(record, "total_bytes")
+            if accepted != total:
+                raise UploadSessionError(409, "Upload is incomplete")
+            path = self._data_path(session_id)
+            self._verify_data_file(path, accepted)
+            return FinalizedUpload(
+                id=session_id,
+                filename=self._string(record, "filename"),
+                total_bytes=total,
+                accepted_bytes=accepted,
+                expires_at=self._string(record, "expires_at"),
+                path=path,
+                options=self._options(record),
+            )
 
     def discard(self, session_id: str) -> None:
-        record = self._load(session_id)
-        self._remove_files(self._string(record, "id"))
+        with self._session_lock:
+            record = self._load(session_id)
+            self._remove_files(self._string(record, "id"))
 
     def _load(self, session_id: str) -> dict[str, object]:
         self._validate_session_id(session_id)
@@ -153,6 +159,14 @@ class UploadSessionService:
         total = self._integer(record, "total_bytes")
         if accepted < 0 or total <= 0 or accepted > total:
             raise UploadSessionError(409, "Upload session metadata is invalid")
+        self._string(record, "filename")
+        self._options(record)
+        data_size = self._data_size(session_id)
+        if data_size < accepted or data_size > total:
+            raise UploadSessionError(409, "Unsafe upload staging file")
+        if data_size > accepted:
+            record["accepted_bytes"] = data_size
+            self._write_metadata(session_id, record)
         return record
 
     def _append_data(self, session_id: str, accepted: int, data: bytes) -> None:
@@ -164,7 +178,10 @@ class UploadSessionService:
                 raise UploadSessionError(409, "Unsafe upload staging file")
             written = 0
             while written < len(data):
-                written += os.write(fd, data[written:])
+                count = os.write(fd, data[written:])
+                if count <= 0:
+                    raise OSError("Could not write upload staging data")
+                written += count
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -175,6 +192,17 @@ class UploadSessionService:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size != accepted:
                 raise UploadSessionError(409, "Unsafe upload staging file")
+        finally:
+            os.close(fd)
+
+    def _data_size(self, session_id: str) -> int:
+        path = self._data_path(session_id)
+        fd = self._open_existing_data(path)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise UploadSessionError(409, "Unsafe upload staging file")
+            return info.st_size
         finally:
             os.close(fd)
 
@@ -205,6 +233,8 @@ class UploadSessionService:
 
     def _write_metadata(self, session_id: str, record: dict[str, object]) -> None:
         payload = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        if len(payload) > MAX_SESSION_METADATA_BYTES:
+            raise UploadSessionError(413, "Upload session metadata is too large")
         temporary = self.staging / f".{session_id}.{secrets.token_hex(8)}.tmp"
         nofollow = getattr(os, "O_NOFOLLOW", None)
         if nofollow is None:
@@ -215,7 +245,12 @@ class UploadSessionService:
             0o600,
         )
         try:
-            os.write(fd, payload)
+            written = 0
+            while written < len(payload):
+                count = os.write(fd, payload[written:])
+                if count <= 0:
+                    raise OSError("Could not write upload session metadata")
+                written += count
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -235,6 +270,8 @@ class UploadSessionService:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise OSError("metadata is not a regular file")
+            if info.st_size > MAX_SESSION_METADATA_BYTES:
+                raise OSError("metadata exceeds size limit")
             raw = b""
             while chunk := os.read(fd, 64 * 1024):
                 raw += chunk
@@ -246,16 +283,17 @@ class UploadSessionService:
         return value
 
     def _cleanup_expired(self) -> None:
-        for metadata_path in self.staging.glob("*.json"):
-            session_id = metadata_path.stem
-            if not SESSION_ID_PATTERN.fullmatch(session_id):
-                continue
-            try:
-                record = self._read_json(metadata_path)
-                if self._parse_expiry(record) <= self._utc_now():
-                    self._remove_files(session_id)
-            except (OSError, ValueError, json.JSONDecodeError, UploadSessionError):
-                continue
+        with self._session_lock:
+            for metadata_path in self.staging.glob("*.json"):
+                session_id = metadata_path.stem
+                if not SESSION_ID_PATTERN.fullmatch(session_id):
+                    continue
+                try:
+                    record = self._read_json(metadata_path)
+                    if self._parse_expiry(record) <= self._utc_now():
+                        self._remove_files(session_id)
+                except (OSError, ValueError, json.JSONDecodeError, UploadSessionError):
+                    continue
 
     def _remove_files(self, session_id: str) -> None:
         self._metadata_path(session_id).unlink(missing_ok=True)
@@ -293,9 +331,12 @@ class UploadSessionService:
         if not isinstance(options, Mapping):
             raise UploadSessionError(400, "Upload options are invalid")
         try:
-            value = json.loads(json.dumps(dict(options)))
+            encoded = json.dumps(dict(options), separators=(",", ":")).encode("utf-8")
+            value = json.loads(encoded)
         except (TypeError, ValueError) as error:
             raise UploadSessionError(400, "Upload options are invalid") from error
+        if len(encoded) > MAX_SESSION_OPTIONS_BYTES:
+            raise UploadSessionError(413, "Upload options are too large")
         if not isinstance(value, dict):
             raise UploadSessionError(400, "Upload options are invalid")
         return value
@@ -318,6 +359,13 @@ class UploadSessionService:
         if not isinstance(value, str):
             raise UploadSessionError(409, "Upload session metadata is invalid")
         return value
+
+    @staticmethod
+    def _options(record: dict[str, object]) -> dict[str, object]:
+        value = record.get("options")
+        if not isinstance(value, dict):
+            raise UploadSessionError(409, "Upload session metadata is invalid")
+        return dict(value)
 
     def _parse_expiry(self, record: dict[str, object]) -> datetime:
         try:
