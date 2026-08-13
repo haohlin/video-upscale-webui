@@ -166,7 +166,7 @@ class JobService:
         runtime_profile_fingerprint = (
             f"seedvr2:{preset}:{self.settings.device_backend_class}:"
             f"scale={output_scale:g}:batch=5:chunk=25:overlap=4:"
-            "dit_cache=disabled:vae_cache=disabled"
+            "dit_cache=enabled:vae_cache=enabled"
         )
         try:
             job = self.store.create(

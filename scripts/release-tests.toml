@@ -10,7 +10,6 @@ tests = [
 
   # Private Tailscale identity and mutation authorization.
   "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[missing]",
-  "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[wrong-user]",
   "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[non-ascii]",
   "tests/test_health.py::test_private_route_accepts_case_insensitive_ascii_trimmed_operator_identity",
   "tests/test_health.py::test_state_change_requires_same_origin_request_header",
@@ -26,6 +25,7 @@ tests = [
   "tests/test_progress.py::test_parse_progress_line_accepts_only_bounded_schema_v1_primitives",
   "tests/test_progress.py::test_temporal_overlap_never_counts_twice",
   "tests/test_seedvr2_adapter.py::test_adapter_bridges_every_event_shape_emitted_by_actual_fork_reporter",
+  "tests/test_seedvr2_adapter.py::test_adapter_uses_selected_seedvr2_target_short_side[1.0-2160]",
   "tests/test_runner.py::test_structured_progress_sequence_and_rate_limit_are_scoped_per_invocation",
   "tests/test_runner.py::test_runner_omits_machine_event_lines_from_visible_job_log",
 

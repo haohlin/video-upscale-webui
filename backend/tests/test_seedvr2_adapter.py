@@ -88,6 +88,8 @@ def test_adapter_uses_selected_seedvr2_target_short_side(
     )
 
     assert command[command.index("--resolution") + 1] == str(expected_short_side)
+    assert command.count("--cache_dit") == 1
+    assert command.count("--cache_vae") == 1
     assert "--use_cache" not in command
     assert "--cache_model" not in command
     assert "--cache_device" not in command
@@ -307,6 +309,24 @@ def test_adapter_flushes_harmless_human_output_immediately():
         adapter.forward_seedvr2_line("model-loading\n")
 
     output.assert_called_once_with("model-loading", flush=True)
+
+
+def test_adapter_replaces_cuda_install_advice_with_mps_status(capsys):
+    adapter = load_adapter()
+
+    with patch.object(adapter.sys, "platform", "darwin"):
+        adapter.forward_seedvr2_line(
+            "⚠️  SeedVR2 optimizations check: SageAttention ❌ | "
+            "Flash Attention ❌ | Triton ❌\n"
+        )
+        adapter.forward_seedvr2_line(
+            "💡 For best performance: pip install sageattention flash-attn triton\n"
+        )
+
+    assert capsys.readouterr().out == (
+        "Apple MPS uses PyTorch SDPA; CUDA-only SageAttention, Flash Attention, "
+        "and Triton are not applicable.\n"
+    )
 
 
 def test_adapter_preserves_harmless_non_event_json_as_human_output(capsys):

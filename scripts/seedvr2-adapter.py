@@ -97,6 +97,17 @@ FORK_COUNTER_KEYS = (
 HUMAN_JSON_KEYS = frozenset({"level", "message"})
 HUMAN_JSON_LEVELS = frozenset({"debug", "info", "warning", "error"})
 SENSITIVE_HUMAN_MARKERS = ("/", "\\", "..")
+CUDA_OPTIMIZATION_STATUS = (
+    "⚠️  SeedVR2 optimizations check: SageAttention ❌ | "
+    "Flash Attention ❌ | Triton ❌"
+)
+CUDA_OPTIMIZATION_ADVICE = (
+    "💡 For best performance: pip install sageattention flash-attn triton"
+)
+MPS_OPTIMIZATION_STATUS = (
+    "Apple MPS uses PyTorch SDPA; CUDA-only SageAttention, Flash Attention, "
+    "and Triton are not applicable."
+)
 
 
 def required_environment(name: str) -> str:
@@ -243,6 +254,12 @@ def _safe_human_json(payload: object) -> bool:
 
 def forward_seedvr2_line(line: str) -> None:
     stripped = line.rstrip("\r\n")
+    if sys.platform == "darwin":
+        if stripped == CUDA_OPTIMIZATION_STATUS:
+            print(MPS_OPTIMIZATION_STATUS, flush=True)
+            return
+        if stripped == CUDA_OPTIMIZATION_ADVICE:
+            return
     if len(stripped) > MAX_OUTPUT_LINE_CHARS:
         if stripped.lstrip().startswith(("{", "[")):
             return
@@ -549,6 +566,8 @@ def build_seedvr2_command(
         "--uniform_batch_size",
         "--chunk_size",
         parameters["chunk_size"],
+        "--cache_dit",
+        "--cache_vae",
         "--temporal_overlap",
         parameters["temporal_overlap"],
         "--color_correction",

@@ -182,7 +182,7 @@ def test_upload_defaults_to_original_resolution_and_exposes_target_dimensions(tm
     assert response.json()["frame_count"] == 105
     assert response.json()["runtime_profile_fingerprint"] == (
         "seedvr2:3b-safe:apple-mps:scale=1:batch=5:chunk=25:overlap=4:"
-        "dit_cache=disabled:vae_cache=disabled"
+        "dit_cache=enabled:vae_cache=enabled"
     )
 
 
