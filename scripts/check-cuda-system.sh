@@ -27,6 +27,16 @@ assert torch.cuda.device_count() == 1, "expected one CUDA GPU"
 assert "4090" in torch.cuda.get_device_name(0), "RTX 4090 unavailable"
 PY
 
+for model in \
+  "$VIDEO_UPSCALE_SEEDVR2_3B_MODEL" \
+  "$VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL" \
+  "$VIDEO_UPSCALE_SEEDVR2_VAE_MODEL"; do
+  [[ -f "$VIDEO_UPSCALE_SEEDVR2_MODEL_DIR/$model" ]] || {
+    echo "required SeedVR2 model missing: $model" >&2
+    exit 1
+  }
+done
+
 [[ "$(git -C "$root" status --porcelain --untracked-files=all)" == "" ]] || {
   echo "repository is modified" >&2; exit 1;
 }

@@ -64,12 +64,16 @@ print(count)
 PY
 }
 
+service_was_active=0
 if ((apply)); then
   [[ "$(active_job_count)" == 0 ]] || {
     echo "refusing runtime update while a queued or active job exists" >&2
     exit 1
   }
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    service_was_active=1
+    systemctl stop "$SERVICE_NAME"
+  fi
   [[ "$(active_job_count)" == 0 ]] || {
     echo "refusing runtime update because a job appeared while stopping the service" >&2
     exit 1
@@ -80,7 +84,8 @@ run install -d -m 0750 -o video-upscale -g video-upscale \
   "$VIDEO_UPSCALE_STATE_ROOT" "$VIDEO_UPSCALE_STATE_ROOT/data" \
   "$VIDEO_UPSCALE_STATE_ROOT/runtime" "$VIDEO_UPSCALE_SEEDVR2_MODEL_DIR"
 run install -d -m 0755 /opt/video-upscale-webui /etc/video-upscale-webui
-run rsync -a --delete --exclude .git --exclude deploy/runtime.env "$PROJECT_ROOT/" /opt/video-upscale-webui/
+run rsync -a --delete --exclude .git --exclude .venv --exclude node_modules \
+  --exclude __pycache__ --exclude deploy/runtime.env "$PROJECT_ROOT/" /opt/video-upscale-webui/
 run python3 -m venv "$VIDEO_UPSCALE_STATE_ROOT/backend-venv"
 run "$VIDEO_UPSCALE_STATE_ROOT/backend-venv/bin/pip" install --require-hashes -r "/opt/video-upscale-webui/backend/requirements.lock"
 checkout "https://github.com/Comfy-Org/ComfyUI.git" "$COMFYUI_DIR" "$COMFYUI_REVISION"
@@ -131,5 +136,8 @@ if ((apply)); then
   }
   chown root:video-upscale /etc/video-upscale-webui/runtime.env
   chmod 0640 /etc/video-upscale-webui/runtime.env
+  if ((service_was_active)); then
+    systemctl start "$SERVICE_NAME"
+  fi
 fi
 echo "WSL runtime installation complete; run scripts/check-cuda-system.sh before starting the service"

@@ -29,6 +29,11 @@ def test_wsl_installer_preserves_models_and_pins_reviewed_seedvr2_fork():
     assert "--index-url https://download.pytorch.org/whl/cu128" in installer
     assert "SELECT COUNT(*) FROM jobs" in installer
     assert "refusing runtime update while a queued or active job exists" in installer
+    assert 'systemctl is-active --quiet "$SERVICE_NAME"' in installer
+    assert 'systemctl stop "$SERVICE_NAME" 2>/dev/null || true' not in installer
+    assert '--exclude node_modules' in installer
+    assert '--exclude .venv' in installer
+    assert 'systemctl start "$SERVICE_NAME"' in installer
 
 
 def test_cuda_preflight_requires_4090_and_24gb_class_vram():
@@ -38,6 +43,10 @@ def test_cuda_preflight_requires_4090_and_24gb_class_vram():
     assert "23000" in preflight
     assert "torch.cuda.is_available()" in preflight
     assert "nvidia-smi" in preflight
+    assert 'VIDEO_UPSCALE_SEEDVR2_MODEL_DIR' in preflight
+    assert 'VIDEO_UPSCALE_SEEDVR2_3B_MODEL' in preflight
+    assert 'VIDEO_UPSCALE_SEEDVR2_7B_FP8_MODEL' in preflight
+    assert 'VIDEO_UPSCALE_SEEDVR2_VAE_MODEL' in preflight
 
 
 def test_wsl_runtime_template_uses_cuda_profiles_and_persistent_paths():
