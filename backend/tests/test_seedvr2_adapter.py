@@ -95,6 +95,47 @@ def test_adapter_uses_selected_seedvr2_target_short_side(
     assert "--cache_device" not in command
 
 
+def test_preflight_allows_reduced_internal_preview_below_product_output_minimum(tmp_path):
+    adapter = load_adapter()
+
+    command = adapter.build_seedvr2_command(
+        input_path=tmp_path / "preflight.mp4",
+        output_path=tmp_path / "preflight-output.mp4",
+        model_dir=tmp_path / "models",
+        model_name="seven-b.safetensors",
+        preset="7b-fp8-experimental",
+        color_correction="lab",
+        source_width=270,
+        source_height=480,
+        output_scale=0.5,
+        mode="preflight",
+        python="seed-python",
+        official_cli=tmp_path / "inference_cli.py",
+    )
+
+    assert command[command.index("--resolution") + 1] == "136"
+
+
+def test_full_run_keeps_product_output_minimum(tmp_path):
+    adapter = load_adapter()
+
+    with pytest.raises(ValueError, match="Target shortest edge must be at least 256 pixels"):
+        adapter.build_seedvr2_command(
+            input_path=tmp_path / "input.mp4",
+            output_path=tmp_path / "output.mp4",
+            model_dir=tmp_path / "models",
+            model_name="seven-b.safetensors",
+            preset="7b-fp8-experimental",
+            color_correction="lab",
+            source_width=270,
+            source_height=480,
+            output_scale=0.5,
+            mode="full",
+            python="seed-python",
+            official_cli=tmp_path / "inference_cli.py",
+        )
+
+
 def test_official_command_opts_into_jsonl_progress(tmp_path):
     adapter = load_adapter()
     command = adapter.build_seedvr2_command(

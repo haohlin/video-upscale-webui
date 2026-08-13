@@ -524,13 +524,17 @@ def remux_audio(
 
 
 def target_short_side(
-    source_width: int, source_height: int, output_scale: float
+    source_width: int,
+    source_height: int,
+    output_scale: float,
+    *,
+    minimum: int = 256,
 ) -> int:
     target_width = max(2, int(source_width * output_scale / 2 + 0.5) * 2)
     target_height = max(2, int(source_height * output_scale / 2 + 0.5) * 2)
     shortest = min(target_width, target_height)
-    if shortest < 256:
-        raise ValueError("Target shortest edge must be at least 256 pixels")
+    if shortest < minimum:
+        raise ValueError(f"Target shortest edge must be at least {minimum} pixels")
     if max(target_width, target_height) > 7680:
         raise ValueError("Target longest edge must not exceed 7680 pixels")
     if target_width * target_height > 33_177_600:
@@ -549,11 +553,17 @@ def build_seedvr2_command(
     source_width: int,
     source_height: int,
     output_scale: float,
+    mode: str = "full",
     python: str,
     official_cli: Path,
 ) -> list[str]:
     parameters = PROFILE_PARAMETERS[preset]
-    resolution = target_short_side(source_width, source_height, output_scale)
+    resolution = target_short_side(
+        source_width,
+        source_height,
+        output_scale,
+        minimum=16 if mode == "preflight" else 256,
+    )
     command = [
         python,
         str(official_cli),
@@ -630,6 +640,7 @@ def main() -> int:
         source_width=width,
         source_height=height,
         output_scale=args.output_scale,
+        mode=args.mode,
         python=sys.executable,
         official_cli=official_cli,
     )
