@@ -373,10 +373,10 @@ def test_final_output_ffprobe_metadata_is_bounded(tmp_path):
             probe.inspect(tmp_path / "result.mp4")
 
 
-def test_ffprobe_returns_bounded_frame_metadata(tmp_path):
-    """Admission must receive frame rate and count, not duration alone."""
+def test_ffprobe_uses_container_frame_metadata_without_full_decode(tmp_path):
+    """Admission must not decode every frame before accepting a normal upload."""
     probe = SubprocessMediaProbe("ffprobe")
-    payload = '{"streams":[{"width":640,"height":360,"avg_frame_rate":"60000/1001","r_frame_rate":"60/1","nb_read_frames":"1800"}],"format":{"duration":"30","format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}'
+    payload = '{"streams":[{"width":640,"height":360,"avg_frame_rate":"60000/1001","r_frame_rate":"60/1","nb_frames":"1800"}],"format":{"duration":"30","format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}'
 
     def write_payload(_command, *, stdout, **_kwargs):
         stdout.write(payload.encode())
@@ -387,7 +387,7 @@ def test_ffprobe_returns_bounded_frame_metadata(tmp_path):
 
     assert media.frame_rate == pytest.approx(59.94, rel=1e-3)
     assert media.frame_count == 1800
-    assert "-count_frames" in run.call_args.args[0]
+    assert "-count_frames" not in run.call_args.args[0]
     assert "-count_packets" not in run.call_args.args[0]
     assert run.call_args.args[0][:2] == ["ffprobe", "-protocol_whitelist"]
 

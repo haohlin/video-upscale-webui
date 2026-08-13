@@ -3,24 +3,36 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import * as api from "../api";
-import type { Job, RuntimeConfig } from "../types";
+import type { Job, RuntimeConfig, UploadSession } from "../types";
 
 vi.mock("../api", () => ({
   createJob: vi.fn(),
   deleteJob: vi.fn(),
   getJobs: vi.fn(),
+  getUploads: vi.fn(),
   getHealth: vi.fn(),
   getConfig: vi.fn(),
   getJobLog: vi.fn(),
   cancelJob: vi.fn(),
+  discardUpload: vi.fn(),
   downloadUrl: vi.fn((id: string) => `/api/jobs/${id}/download`),
 }));
 
 const getJobs = vi.mocked(api.getJobs);
+const getUploads = vi.mocked(api.getUploads);
 const getHealth = vi.mocked(api.getHealth);
 const getConfig = vi.mocked(api.getConfig);
 const getJobLog = vi.mocked(api.getJobLog);
 const createJob = vi.mocked(api.createJob);
+const discardUpload = vi.mocked(api.discardUpload);
+
+const pendingUpload: UploadSession = {
+  id: "upload-pending",
+  filename: "lake.mov",
+  total_bytes: 60,
+  accepted_bytes: 12,
+  expires_at: "2026-08-14T06:00:00Z",
+};
 
 const runtimeConfig: RuntimeConfig = {
   default_profile: "3b-safe",
@@ -102,21 +114,24 @@ afterEach(() => {
 describe("App", () => {
   beforeEach(() => {
     getJobs.mockReset();
+    getUploads.mockReset();
     getHealth.mockReset();
     getConfig.mockReset();
     getJobLog.mockReset();
     getJobs.mockResolvedValue([]);
+    getUploads.mockResolvedValue([]);
     getHealth.mockResolvedValue({ status: "ok" });
     getConfig.mockResolvedValue(runtimeConfig);
     getJobLog.mockResolvedValue({ text: "", next_offset: 0, size: 0, truncated: false });
     createJob.mockReset();
+    discardUpload.mockReset();
   });
 
   it("shows upload controls and server-configured output scale choices", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Video Upscale" })).toBeVisible();
-    expect(screen.getByLabelText("Choose video file")).toHaveAttribute(
+    expect(screen.getByLabelText("Choose new video file")).toHaveAttribute(
       "accept",
       "video/*,.mp4,.mov,.mkv,.avi,.webm",
     );
@@ -127,13 +142,73 @@ describe("App", () => {
     expect(screen.getByRole("radio", { name: /2x Upscale.*Double width and height; highest processing cost/i })).toBeVisible();
   });
 
+  it("restores pending uploads after refresh and resumes only the exact file", async () => {
+    const user = userEvent.setup();
+    getUploads.mockResolvedValue([pendingUpload]);
+    createJob.mockResolvedValue(jobFixture({ id: pendingUpload.id }));
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Pending uploads" })).toBeVisible();
+    expect(screen.getByText(/12 B \/ 60 B confirmed/)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Resume lake.mov" }));
+    await user.upload(
+      screen.getByLabelText("Choose file to resume lake.mov"),
+      new File(["x".repeat(60)], "wrong.mov", { type: "video/quicktime" }),
+    );
+    expect(await screen.findByText("Selected file does not match this pending upload")).toBeVisible();
+    expect(createJob).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Resume lake.mov" }));
+    await user.upload(
+      screen.getByLabelText("Choose file to resume lake.mov"),
+      new File(["x".repeat(60)], "lake.mov", { type: "video/quicktime" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Resume upload" }));
+
+    expect(createJob).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "lake.mov", size: 60 }),
+      "3b-safe",
+      "lab",
+      1,
+      expect.objectContaining({ resumeSessionId: pendingUpload.id }),
+    );
+  });
+
+  it("ends one pending upload and keeps upload-new separate", async () => {
+    const user = userEvent.setup();
+    getUploads.mockResolvedValue([pendingUpload]);
+    discardUpload.mockResolvedValue();
+    createJob.mockResolvedValue(jobFixture());
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Pending uploads" });
+    await user.click(screen.getByRole("button", { name: "End upload lake.mov" }));
+    expect(discardUpload).toHaveBeenCalledWith(pendingUpload.id);
+    await waitFor(() => expect(screen.queryByText(/12 B \/ 60 B confirmed/)).not.toBeInTheDocument());
+
+    await user.upload(
+      screen.getByLabelText("Choose new video file"),
+      new File(["new"], "new.mov", { type: "video/quicktime" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Start processing" }));
+    expect(createJob).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: "new.mov" }),
+      "3b-safe",
+      "lab",
+      1,
+      expect.objectContaining({ resumeSessionId: undefined }),
+    );
+  });
+
   it("submits selected video and server-configured output scale", async () => {
     const user = userEvent.setup();
     createJob.mockResolvedValue(jobFixture({ output_scale: 0.5, target_width: 960, target_height: 540 }));
     render(<App />);
 
     await user.click(await screen.findByRole("radio", { name: /0.5x Balanced/i }));
-    await user.upload(screen.getByLabelText("Choose video file"), new File(["movie"], "lake.mov", { type: "video/quicktime" }));
+    await user.upload(screen.getByLabelText("Choose new video file"), new File(["movie"], "lake.mov", { type: "video/quicktime" }));
     await user.click(screen.getByRole("button", { name: "Start processing" }));
 
     expect(createJob).toHaveBeenCalledWith(
@@ -169,7 +244,7 @@ describe("App", () => {
     vi.spyOn(HTMLVideoElement.prototype, "videoHeight", "get").mockReturnValue(1080);
     const user = userEvent.setup();
     const view = render(<App />);
-    const input = await screen.findByLabelText("Choose video file");
+    const input = await screen.findByLabelText("Choose new video file");
 
     await user.upload(input, new File(["one"], "one.mov", { type: "video/quicktime" }));
     await waitFor(() => expect(document.querySelector("video")).not.toBeNull());
@@ -289,7 +364,7 @@ describe("App", () => {
     }) as typeof api.createJob);
     render(<App />);
 
-    const input = await screen.findByLabelText("Choose video file");
+    const input = await screen.findByLabelText("Choose new video file");
     await user.upload(input, new File(["movie"], "lake.mov", { type: "video/quicktime" }));
     await user.click(screen.getByRole("button", { name: "Start processing" }));
 
@@ -328,7 +403,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.upload(await screen.findByLabelText("Choose video file"), new File(["movie"], "new.mov"));
+    await user.upload(await screen.findByLabelText("Choose new video file"), new File(["movie"], "new.mov"));
     await user.click(screen.getByRole("button", { name: "Start processing" }));
     await user.click(screen.getByRole("button", { name: "Show debug console" }));
 
@@ -363,7 +438,7 @@ describe("App", () => {
       .mockResolvedValueOnce(jobFixture({ id: "upload-resume" }));
     render(<App />);
 
-    await user.upload(await screen.findByLabelText("Choose video file"), new File(["movie"], "new.mov"));
+    await user.upload(await screen.findByLabelText("Choose new video file"), new File(["movie"], "new.mov"));
     await user.click(screen.getByRole("button", { name: "Start processing" }));
     expect(await screen.findByRole("button", { name: "Resume upload" })).toBeVisible();
 

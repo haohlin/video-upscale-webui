@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
-import { ApiError, cancelJob, createJob, deleteJob, downloadUrl, getConfig, getHealth, getJobLog, getJobs } from "./api";
-import { outputScales, presetIds, type ColorCorrection, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type UploadProgress } from "./types";
+import { ApiError, cancelJob, createJob, deleteJob, discardUpload, downloadUrl, getConfig, getHealth, getJobLog, getJobs, getUploads } from "./api";
+import { outputScales, presetIds, type ColorCorrection, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type UploadProgress, type UploadSession } from "./types";
 
 const pollMs = 2_000;
 const acceptedVideoTypes = "video/*,.mp4,.mov,.mkv,.avi,.webm";
@@ -159,6 +159,7 @@ function expectedDimension(value: number, scale: OutputScale): number {
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const resumeInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preset, setPreset] = useState<PresetId>("3b-safe");
   const [colorCorrection, setColorCorrection] = useState<ColorCorrection>("lab");
@@ -167,6 +168,7 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [sourceDimensions, setSourceDimensions] = useState<{ width: number; height: number } | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [pendingUploads, setPendingUploads] = useState<UploadSession[]>([]);
   const [lastPollReceivedAt, setLastPollReceivedAt] = useState(() => Date.now());
   const [displayNow, setDisplayNow] = useState(() => Date.now());
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -175,16 +177,18 @@ export default function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [uploadState, setUploadState] = useState<UploadState | null>(null);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+  const [resumeTarget, setResumeTarget] = useState<UploadSession | null>(null);
   const [showDebugConsole, setShowDebugConsole] = useState(false);
   const [debugText, setDebugText] = useState("");
   const debugOffsetRef = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
-      const [health, nextJobs] = await Promise.all([getHealth(), getJobs()]);
+      const [health, nextJobs, nextUploads] = await Promise.all([getHealth(), getJobs(), getUploads()]);
       if (health.status.toLowerCase() !== "ok") throw new ApiError("Service is not ready");
       const receivedAt = Date.now();
       setJobs(sortJobs(nextJobs));
+      setPendingUploads(nextUploads);
       setLastPollReceivedAt(receivedAt);
       setDisplayNow(receivedAt);
       setConnectionError(null);
@@ -277,8 +281,44 @@ export default function App() {
     if (!file) return;
     setActionError(null);
     setResumeSessionId(null);
+    setResumeTarget(null);
     setUploadState(null);
     setSelectedFile(file);
+  };
+
+  const chooseResumeFile = (file?: File) => {
+    if (!file || !resumeTarget) return;
+    if (file.name !== resumeTarget.filename || file.size !== resumeTarget.total_bytes) {
+      setActionError("Selected file does not match this pending upload");
+      return;
+    }
+    setActionError(null);
+    setUploadState(null);
+    setSelectedFile(file);
+    setResumeSessionId(resumeTarget.id);
+  };
+
+  const beginResume = (upload: UploadSession) => {
+    setActionError(null);
+    setResumeTarget(upload);
+    window.setTimeout(() => resumeInputRef.current?.click(), 0);
+  };
+
+  const endUpload = async (upload: UploadSession) => {
+    if (!window.confirm(`End upload for ${upload.filename}? Confirmed partial data will be deleted.`)) return;
+    setActionError(null);
+    try {
+      await discardUpload(upload.id);
+      setPendingUploads((current) => current.filter((item) => item.id !== upload.id));
+      if (resumeSessionId === upload.id) {
+        setSelectedFile(null);
+        setResumeSessionId(null);
+        setResumeTarget(null);
+        setUploadState(null);
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not end pending upload");
+    }
   };
 
   const onSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -317,6 +357,7 @@ export default function App() {
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Upload failed");
       setUploadState((current) => current && { ...current, phase: "paused", retryAttempt: 0 });
+      await refresh();
     } finally {
       setIsSubmitting(false);
     }
@@ -377,11 +418,23 @@ export default function App() {
             ref={fileInputRef}
             id="video-file"
             className="visually-hidden"
-            aria-label="Choose video file"
+            aria-label="Choose new video file"
             type="file"
             accept={acceptedVideoTypes}
             disabled={isSubmitting}
             onChange={(event) => chooseFile(event.currentTarget.files?.[0])}
+          />
+          <input
+            ref={resumeInputRef}
+            className="visually-hidden"
+            aria-label={resumeTarget ? `Choose file to resume ${resumeTarget.filename}` : "Choose file to resume upload"}
+            type="file"
+            accept={acceptedVideoTypes}
+            disabled={isSubmitting}
+            onChange={(event) => {
+              chooseResumeFile(event.currentTarget.files?.[0]);
+              event.currentTarget.value = "";
+            }}
           />
           <label
             className={`drop-zone ${isDragging ? "drop-zone--active" : ""}`}
@@ -395,12 +448,34 @@ export default function App() {
             }}
           >
             <span className="upload-icon">{icon("upload")}</span>
-            <strong className="upload-copy upload-copy--desktop">Drag & drop a video here</strong>
+            <strong className="upload-copy upload-copy--desktop">Upload a new video</strong>
             <span className="drop-copy drop-copy--desktop">or <em>click to browse</em></span>
-            <strong className="upload-copy upload-copy--mobile">Upload a video to get started</strong>
+            <strong className="upload-copy upload-copy--mobile">Upload a new video</strong>
             <span className="drop-copy drop-copy--mobile">MP4, MOV, MKV, AVI, or WebM</span>
             <span className="photo-action">Choose from Photos</span>
           </label>
+
+          {pendingUploads.length > 0 && (
+            <section className="pending-uploads" aria-label="Pending uploads">
+              <h3>Pending uploads</h3>
+              {pendingUploads.map((upload) => {
+                const percent = Math.min(100, Math.round((upload.accepted_bytes / upload.total_bytes) * 100));
+                return (
+                  <article className="pending-upload" key={upload.id}>
+                    <div>
+                      <strong>{upload.filename}</strong>
+                      <span>{formatBytes(upload.accepted_bytes)} / {formatBytes(upload.total_bytes)} confirmed · {percent}%</span>
+                      <small>Available until {new Date(upload.expires_at).toLocaleString()}</small>
+                    </div>
+                    <div className="pending-upload__actions">
+                      <button type="button" disabled={isSubmitting} aria-label={`Resume ${upload.filename}`} onClick={() => beginResume(upload)}>Resume</button>
+                      <button type="button" disabled={isSubmitting} aria-label={`End upload ${upload.filename}`} onClick={() => void endUpload(upload)}>End upload</button>
+                    </div>
+                  </article>
+                );
+              })}
+            </section>
+          )}
 
           {selectedFile && (
             <section className="selected-file" aria-label="Selected video">
@@ -412,7 +487,7 @@ export default function App() {
                   <span>Expected output: {expectedDimension(sourceDimensions.width, outputScale)} × {expectedDimension(sourceDimensions.height, outputScale)}</span>
                 )}
               </div>
-              <button type="button" className="icon-button" aria-label="Remove selected video" disabled={isSubmitting} onClick={() => { setSelectedFile(null); setResumeSessionId(null); setUploadState(null); }}>{icon("x")}</button>
+              <button type="button" className="icon-button" aria-label="Remove selected video" disabled={isSubmitting} onClick={() => { setSelectedFile(null); setResumeSessionId(null); setResumeTarget(null); setUploadState(null); }}>{icon("x")}</button>
             </section>
           )}
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createJob } from "../api";
+import { createJob, discardUpload, getUploads } from "../api";
 
 const session = {
   id: "upload-1",
@@ -105,5 +105,20 @@ describe("createJob", () => {
       method: "PUT",
       headers: expect.objectContaining({ "Upload-Offset": "2" }),
     }));
+  });
+});
+
+describe("pending uploads", () => {
+  it("lists and discards server-persisted uploads", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response(200, { uploads: [session] }))
+      .mockResolvedValueOnce({ ok: true, status: 204, json: async () => undefined } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getUploads()).resolves.toEqual([session]);
+    await expect(discardUpload(session.id)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/uploads", expect.any(Object));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/uploads/upload-1", expect.objectContaining({ method: "DELETE" }));
   });
 });

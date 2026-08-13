@@ -41,9 +41,8 @@ class SubprocessMediaProbe:
             "error",
             "-select_streams",
             "v:0",
-            "-count_frames",
             "-show_entries",
-            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,nb_read_frames:format=duration,format_name",
+            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames:format=duration,format_name",
             "-of",
             "json",
             str(path),
@@ -77,9 +76,7 @@ class SubprocessMediaProbe:
             frame_rate = _parse_frame_rate(stream.get("avg_frame_rate"))
             if frame_rate <= 0:
                 frame_rate = _parse_frame_rate(stream.get("r_frame_rate"))
-            raw_frame_count = stream.get("nb_read_frames")
-            if raw_frame_count in (None, "N/A"):
-                raw_frame_count = stream.get("nb_frames")
+            raw_frame_count = stream.get("nb_frames")
             frame_count = (
                 int(raw_frame_count)
                 if raw_frame_count not in (None, "N/A")

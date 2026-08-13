@@ -4,14 +4,13 @@ max_tests = 49
 [backend]
 tests = [
   # Scale admission and deterministic target sizing.
-  "tests/test_resumable_upload_api.py::test_upload_routes_require_operator_and_mutation_header",
+  "tests/test_resumable_upload_api.py::test_list_pending_uploads_after_refresh_requires_operator",
   "tests/test_jobs.py::test_upload_rejects_non_allowlisted_output_scale[1;touch /tmp/pwned]",
   "tests/test_jobs.py::test_target_dimensions_enforce_edge_and_pixel_ceiling[4096-2160-2.0-Target longest edge must not exceed 7680 pixels]",
 
   # Private Tailscale identity and mutation authorization.
   "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[missing]",
   "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[wrong-user]",
-  "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[tagged-node]",
   "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[non-ascii]",
   "tests/test_health.py::test_private_route_accepts_case_insensitive_ascii_trimmed_operator_identity",
   "tests/test_health.py::test_state_change_requires_same_origin_request_header",
@@ -21,6 +20,7 @@ tests = [
   "tests/test_jobs.py::test_queued_job_can_be_cancelled_without_running",
   "tests/test_runner.py::test_cancellation_terminates_and_kills_adapter_process_group_before_returning",
   "tests/test_runner.py::test_final_output_ffprobe_metadata_is_bounded",
+  "tests/test_runner.py::test_ffprobe_uses_container_frame_metadata_without_full_decode",
 
   # Strict progress schema and real fork-to-WebUI bridge.
   "tests/test_progress.py::test_parse_progress_line_accepts_only_bounded_schema_v1_primitives",
@@ -55,8 +55,8 @@ tests = [
   "App > warns when heartbeat is stale and hides ETA",
   "App > distinguishes live heartbeat from stale measured work and hides ETA",
   "App > does not mix a current upload with an older completed job log",
-  "App > labels completed output as historical and states backend validation reached 100",
-  "App > offers resume with the same server session after retries are exhausted",
+  "App > restores pending uploads after refresh and resumes only the exact file",
+  "App > ends one pending upload and keeps upload-new separate",
   "createJob > uploads fixed chunks and reports only server-confirmed bytes",
   "createJob > retries a transient chunk failure without advancing confirmed offset",
 ]

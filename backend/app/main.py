@@ -196,6 +196,10 @@ def create_app(
         except UploadSessionError as error:
             raise upload_error(error) from error
 
+    @service.get("/api/uploads")
+    def list_uploads() -> dict[str, list[dict[str, object]]]:
+        return {"uploads": uploads.list_pending()}
+
     @service.get("/api/uploads/{upload_id}")
     def get_upload(upload_id: str) -> dict[str, object]:
         try:

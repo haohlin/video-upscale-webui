@@ -100,6 +100,15 @@ h1, h2, p { margin: 0; }
 .primary-button svg path { transform-origin: center; }
 .primary-button:disabled svg { animation: spin 1s linear infinite; }
 .settings-footnote { margin: 10px 2px 0; color: #8e9bad; font-size: .7rem; line-height: 1.35; }
+.pending-uploads { display: grid; gap: 8px; margin: 0 0 14px; }
+.pending-uploads h3 { margin: 0; color: #dce7f8; font-size: .82rem; }
+.pending-upload { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 10px; border: 1px solid #3b526d; border-radius: 7px; background: #111b26; }
+.pending-upload > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.pending-upload strong { overflow: hidden; font-size: .78rem; white-space: nowrap; text-overflow: ellipsis; }
+.pending-upload span, .pending-upload small { color: #91a1b4; font-size: .68rem; }
+.pending-upload__actions { display: flex; gap: 6px; align-items: center; }
+.pending-upload__actions button { min-height: 32px; padding: 5px 8px; border: 1px solid #4d6f9e; border-radius: 6px; color: #b9d2ff; background: #14243b; font-size: .7rem; }
+.pending-upload__actions button:last-child { border-color: #754750; color: #f1b7c0; background: #301b20; }
 
 .jobs-panel { min-height: 448px; }
 .job-list, .result-list { display: grid; gap: 10px; }

@@ -1,16 +1,8 @@
-import type { ColorCorrection, Health, Job, JobLogTail, OutputScale, PresetId, RuntimeConfig, UploadProgress } from "./types";
+import type { ColorCorrection, Health, Job, JobLogTail, OutputScale, PresetId, RuntimeConfig, UploadProgress, UploadSession } from "./types";
 
 const apiRoot = "/api";
 const uploadChunkBytes = 4 * 1024 * 1024;
 const maxChunkAttempts = 3;
-
-interface UploadSession {
-  id: string;
-  filename: string;
-  total_bytes: number;
-  accepted_bytes: number;
-  expires_at: string;
-}
 
 export class ApiError extends Error {
   constructor(
@@ -43,6 +35,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(message, response.status);
   }
 
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -57,6 +50,15 @@ export async function getConfig(): Promise<RuntimeConfig> {
 export async function getJobs(): Promise<Job[]> {
   const result = await request<{ jobs: Job[] }>("/jobs");
   return result.jobs;
+}
+
+export async function getUploads(): Promise<UploadSession[]> {
+  const result = await request<{ uploads: UploadSession[] }>("/uploads");
+  return result.uploads;
+}
+
+export async function discardUpload(id: string): Promise<void> {
+  await request<void>(`/uploads/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function createJob(

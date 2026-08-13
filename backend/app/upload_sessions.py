@@ -98,6 +98,26 @@ class UploadSessionService:
         with self._session_lock:
             return self._public(self._load(session_id))
 
+    def list_pending(self) -> list[dict[str, object]]:
+        with self._session_lock:
+            self._cleanup_expired()
+            pending: list[dict[str, object]] = []
+            for metadata_path in self.staging.glob("*.json"):
+                session_id = metadata_path.stem
+                if not SESSION_ID_PATTERN.fullmatch(session_id):
+                    continue
+                try:
+                    record = self._load(session_id)
+                    if not self._finalizing(record):
+                        pending.append(self._public(record))
+                except (OSError, ValueError, json.JSONDecodeError, UploadSessionError):
+                    continue
+            return sorted(
+                pending,
+                key=lambda item: (str(item["expires_at"]), str(item["id"])),
+                reverse=True,
+            )
+
     def append(self, session_id: str, *, offset: int, data: bytes) -> dict[str, object]:
         if type(offset) is not int or offset < 0:
             raise UploadSessionError(400, "Upload offset is invalid")

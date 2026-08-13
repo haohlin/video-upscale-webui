@@ -71,6 +71,14 @@ export interface UploadProgress {
   retryAttempt: number;
 }
 
+export interface UploadSession {
+  id: string;
+  filename: string;
+  total_bytes: number;
+  accepted_bytes: number;
+  expires_at: string;
+}
+
 export interface JobLogTail {
   text: string;
   next_offset: number;

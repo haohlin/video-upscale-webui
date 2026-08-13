@@ -62,6 +62,31 @@ def test_status_recovers_persisted_offset_after_service_restart(tmp_path):
     assert recovered["total_bytes"] == 7
 
 
+def test_list_pending_returns_valid_sessions_after_refresh(tmp_path):
+    """Losing resumable sessions after browser refresh must fail this test."""
+    current = datetime(2026, 8, 13, tzinfo=UTC)
+    settings = make_settings(tmp_path)
+    service = UploadSessionService(settings, now=lambda: current)
+
+    expired = service.create(filename="expired.mov", total_bytes=1)
+    current += timedelta(seconds=settings.upload_session_ttl_seconds + 1)
+    older = service.create(filename="older.mov", total_bytes=6)
+    service.append(older["id"], offset=0, data=b"abc")
+    current += timedelta(seconds=1)
+    newer = service.create(filename="newer.mov", total_bytes=2)
+    current += timedelta(seconds=1)
+    claimed = service.create(filename="claimed.mov", total_bytes=1)
+    service.append(claimed["id"], offset=0, data=b"x")
+    service.claim_finalization(claimed["id"])
+
+    pending = service.list_pending()
+
+    assert [item["id"] for item in pending] == [newer["id"], older["id"]]
+    assert pending[1]["accepted_bytes"] == 3
+    assert expired["id"] not in {item["id"] for item in pending}
+    assert claimed["id"] not in {item["id"] for item in pending}
+
+
 def test_restart_recovers_durable_chunk_when_metadata_update_fails(tmp_path, monkeypatch):
     """Leaving a fsynced chunk unconfirmed after metadata failure must fail this test."""
     settings = make_settings(tmp_path)

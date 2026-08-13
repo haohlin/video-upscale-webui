@@ -66,6 +66,18 @@ def test_upload_routes_require_operator_and_mutation_header(tmp_path):
     ).status_code == 403
 
 
+def test_list_pending_uploads_after_refresh_requires_operator(tmp_path):
+    """Keeping pending uploads only in browser memory must fail this test."""
+    api = client(tmp_path)
+    session = create_session(api)
+
+    listed = api.get("/api/uploads")
+
+    assert listed.status_code == 200
+    assert listed.json() == {"uploads": [session]}
+    assert TestClient(api.app).get("/api/uploads").status_code == 403
+
+
 def test_upload_api_confirms_offsets_and_retry_does_not_duplicate_data(tmp_path):
     """Accepting a retried chunk at a stale offset must fail this test."""
     api = client(tmp_path)
