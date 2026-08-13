@@ -1,0 +1,22 @@
+[Unit]
+Description=Video Upscale WebUI CUDA backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=video-upscale
+Group=video-upscale
+EnvironmentFile=/etc/video-upscale-webui/runtime.env
+WorkingDirectory=/opt/video-upscale-webui/backend
+ExecStart=/var/lib/video-upscale-webui/backend-venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/video-upscale-webui
+
+[Install]
+WantedBy=multi-user.target
