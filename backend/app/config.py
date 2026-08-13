@@ -38,6 +38,7 @@ class Settings:
     ffprobe_timeout_seconds: int = 30
     upload_idle_timeout_seconds: int = 30
     upload_total_timeout_seconds: int = 6 * 60 * 60
+    upload_session_ttl_seconds: int = 24 * 60 * 60
     max_duration_seconds: int = 3600
     max_source_dimension: int = 3840
     max_source_pixels: int = 3840 * 2160
@@ -112,6 +113,9 @@ class Settings:
             upload_total_timeout_seconds=int(
                 os.environ.get("VIDEO_UPSCALE_UPLOAD_TOTAL_TIMEOUT_SECONDS", str(6 * 60 * 60))
             ),
+            upload_session_ttl_seconds=int(
+                os.environ.get("VIDEO_UPSCALE_UPLOAD_SESSION_TTL_SECONDS", str(24 * 60 * 60))
+            ),
             max_duration_seconds=int(
                 os.environ.get("VIDEO_UPSCALE_MAX_DURATION_SECONDS", "3600")
             ),
@@ -164,6 +168,7 @@ class Settings:
             ffprobe_timeout_seconds=self.ffprobe_timeout_seconds,
             upload_idle_timeout_seconds=self.upload_idle_timeout_seconds,
             upload_total_timeout_seconds=self.upload_total_timeout_seconds,
+            upload_session_ttl_seconds=self.upload_session_ttl_seconds,
             max_duration_seconds=self.max_duration_seconds,
             max_source_dimension=self.max_source_dimension,
             max_source_pixels=self.max_source_pixels,
