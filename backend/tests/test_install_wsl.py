@@ -93,4 +93,4 @@ def test_windows_tailscale_serve_script_is_private_and_exact_port_only():
     assert "--https" in serve
     assert "127.0.0.1:8000" in serve
     assert "tailscale funnel" not in serve.lower()
-    assert "8444" in serve
+    assert "443" in serve

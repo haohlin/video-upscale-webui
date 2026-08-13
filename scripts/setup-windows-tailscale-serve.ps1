@@ -1,6 +1,6 @@
 param(
     [switch]$Apply,
-    [int]$HttpsPort = 8444,
+    [int]$HttpsPort = 443,
     [int]$BackendPort = 8000
 )
 

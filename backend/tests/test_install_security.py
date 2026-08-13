@@ -6,6 +6,14 @@ import subprocess
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_runtime_loader_exports_optional_backend_registry():
+    library = (PROJECT_ROOT / "scripts/lib.sh").read_text()
+
+    assert "VIDEO_UPSCALE_BACKENDS_JSON" in library
+    assert "VIDEO_UPSCALE_ALLOWED_WEB_ORIGIN" in library
+    assert 'export "$optional_name"' in library
+
+
 def run_config_loader(config: Path, command: str) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.pop("VIDEO_UPSCALE_TAILSCALE_USER_LOGIN", None)
