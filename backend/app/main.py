@@ -6,6 +6,7 @@ from typing import Callable
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import ASCII_WHITESPACE, Settings
 from .job_service import JobService
@@ -49,6 +50,13 @@ def create_app(
     service = FastAPI(title="Video Upscale WebUI API")
     service.state.job_service = jobs
     service.state.upload_session_service = uploads
+    if settings.allowed_web_origin:
+        service.add_middleware(
+            CORSMiddleware,
+            allow_origins=[settings.allowed_web_origin],
+            allow_methods=["GET", "POST", "PUT", "DELETE"],
+            allow_headers=["Content-Type", "Upload-Offset", "X-Video-Upscale-Request"],
+        )
     service.add_middleware(
         UploadBodyGuard,
         max_body_bytes=settings.max_upload_bytes,
@@ -87,6 +95,8 @@ def create_app(
     async def require_operator_authentication(request: Request, call_next):
         if request.url.path == "/api/health":
             return await call_next(request)
+        if request.method == "OPTIONS" and request.headers.get("origin"):
+            return await call_next(request)
         actual_login = request.headers.get("tailscale-user-login", "").strip(
             ASCII_WHITESPACE
         )
@@ -115,21 +125,30 @@ def create_app(
 
     @service.get("/api/health")
     def health():
+        capabilities = {
+            "backend_id": settings.backend_id,
+            "display_name": settings.backend_display_name,
+            "platform": settings.platform_name,
+            "accelerator": settings.accelerator_name,
+            "presets": list(settings.presets),
+        }
         if getattr(runner, "health_status", "ready") != "ready":
             return JSONResponse(
                 status_code=503,
                 content={
                     "status": "degraded",
                     "runner": "unavailable",
+                    "state": "offline",
+                    **capabilities,
                 },
             )
-        return {"status": "ok", "runner": "ready"}
+        return {"status": "ok", "runner": "ready", "state": "ready", **capabilities}
 
     @service.get("/api/config")
     def config() -> dict[str, object]:
         return {
             "default_profile": settings.default_profile,
-            "presets": ["3b-safe", "7b-fp8-experimental"],
+            "presets": list(settings.presets),
             "default_output_scale": settings.default_output_scale,
             "output_scales": [
                 {

@@ -14,7 +14,6 @@ from .config import Settings
 from .domain import (
     COLOR_CORRECTIONS,
     OUTPUT_SCALES,
-    PRESETS,
     TERMINAL_STATUSES,
     Job,
     PreflightLimits,
@@ -198,7 +197,7 @@ class JobService:
         output_scale: float | None,
     ) -> tuple[str, str, float, str]:
         preset = preset or self.settings.default_profile
-        if preset not in PRESETS:
+        if preset not in self.settings.presets:
             raise HTTPException(422, "Unsupported processing preset")
         if color_correction not in COLOR_CORRECTIONS:
             raise HTTPException(422, "Unsupported color correction")

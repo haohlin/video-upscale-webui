@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 DEFAULT_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
@@ -11,6 +13,11 @@ DEFAULT_3B_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 DEFAULT_7B_FP8_MODEL = "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors"
 DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
 ASCII_WHITESPACE = " \t\r\n\v\f"
+BACKEND_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+PLATFORM_PRESETS = {
+    "apple-mps": ("3b-safe", "7b-fp8-experimental"),
+    "nvidia-cuda": ("7b-fp8-quality", "3b-fp8-fast"),
+}
 
 
 @dataclass(frozen=True)
@@ -48,10 +55,22 @@ class Settings:
     max_process_seconds: int = 24 * 60 * 60
     max_job_log_bytes: int = 10 * 1024 * 1024
     max_job_artifact_bytes: int = 64 * 1024 * 1024 * 1024
+    backend_id: str = "mac"
+    backend_display_name: str = "Mac M4 Pro"
+    platform_name: str = "macos"
+    accelerator_name: str = "Apple MPS"
+    allowed_web_origin: str | None = None
 
     @property
     def disk_reserve_bytes(self) -> int:
         return self.disk_reserve_gb * 1024 * 1024 * 1024
+
+    @property
+    def presets(self) -> tuple[str, ...]:
+        try:
+            return PLATFORM_PRESETS[self.device_backend_class]
+        except KeyError as error:
+            raise RuntimeError("Unsupported Video Upscale device backend class") from error
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -72,8 +91,28 @@ class Settings:
         ).strip(ASCII_WHITESPACE)
         if not tailscale_user_login:
             raise RuntimeError("Video Upscale Tailscale user login is not configured")
+        device_backend_class = os.environ.get(
+            "VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "apple-mps"
+        )
+        backend_id = os.environ.get("VIDEO_UPSCALE_BACKEND_ID", "mac")
+        if not BACKEND_ID_PATTERN.fullmatch(backend_id):
+            raise RuntimeError("Video Upscale backend ID is invalid")
+        allowed_web_origin = os.environ.get("VIDEO_UPSCALE_ALLOWED_WEB_ORIGIN") or None
+        if allowed_web_origin:
+            parsed_origin = urlsplit(allowed_web_origin)
+            if (
+                parsed_origin.scheme != "https"
+                or not parsed_origin.hostname
+                or parsed_origin.username is not None
+                or parsed_origin.password is not None
+                or parsed_origin.path not in {"", "/"}
+                or parsed_origin.query
+                or parsed_origin.fragment
+            ):
+                raise RuntimeError("Video Upscale allowed Web origin is invalid")
+            allowed_web_origin = allowed_web_origin.rstrip("/")
         model_dir_value = os.environ.get("VIDEO_UPSCALE_SEEDVR2_MODEL_DIR")
-        return cls(
+        settings = cls(
             project_root=project_root,
             runtime_root=runtime_root,
             data_root=data_root,
@@ -90,9 +129,7 @@ class Settings:
             default_output_scale=float(
                 os.environ.get("VIDEO_UPSCALE_DEFAULT_OUTPUT_SCALE", "1.0")
             ),
-            device_backend_class=os.environ.get(
-                "VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "apple-mps"
-            ),
+            device_backend_class=device_backend_class,
             heartbeat_stale_seconds=int(
                 os.environ.get("VIDEO_UPSCALE_HEARTBEAT_STALE_SECONDS", "120")
             ),
@@ -141,7 +178,19 @@ class Settings:
             max_job_artifact_bytes=int(
                 os.environ.get("VIDEO_UPSCALE_MAX_JOB_ARTIFACT_BYTES", str(64 * 1024 * 1024 * 1024))
             ),
+            backend_id=backend_id,
+            backend_display_name=os.environ.get(
+                "VIDEO_UPSCALE_BACKEND_DISPLAY_NAME", "Mac M4 Pro"
+            ),
+            platform_name=os.environ.get("VIDEO_UPSCALE_PLATFORM_NAME", "macos"),
+            accelerator_name=os.environ.get(
+                "VIDEO_UPSCALE_ACCELERATOR_NAME", "Apple MPS"
+            ),
+            allowed_web_origin=allowed_web_origin,
         )
+        if settings.default_profile not in settings.presets:
+            raise RuntimeError("Default processing profile is unavailable on this backend")
+        return settings
 
     def with_data_root(self, data_root: Path, max_upload_bytes: int | None) -> "Settings":
         return Settings(
@@ -178,4 +227,9 @@ class Settings:
             max_process_seconds=self.max_process_seconds,
             max_job_log_bytes=self.max_job_log_bytes,
             max_job_artifact_bytes=self.max_job_artifact_bytes,
+            backend_id=self.backend_id,
+            backend_display_name=self.backend_display_name,
+            platform_name=self.platform_name,
+            accelerator_name=self.accelerator_name,
+            allowed_web_origin=self.allowed_web_origin,
         )

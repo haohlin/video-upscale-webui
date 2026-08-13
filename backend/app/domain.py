@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PRESETS = frozenset({"3b-safe", "7b-fp8-experimental"})
 COLOR_CORRECTIONS = frozenset({"lab", "none"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 OUTPUT_SCALES = frozenset({0.25, 0.5, 1.0, 2.0})

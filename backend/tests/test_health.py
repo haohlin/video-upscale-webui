@@ -24,7 +24,16 @@ def test_health_reports_ready_status_for_available_runner(tmp_path):
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "runner": "ready"}
+    assert response.json() == {
+        "status": "ok",
+        "runner": "ready",
+        "backend_id": "mac",
+        "display_name": "Mac M4 Pro",
+        "platform": "macos",
+        "accelerator": "Apple MPS",
+        "state": "ready",
+        "presets": ["3b-safe", "7b-fp8-experimental"],
+    }
 
 
 def test_health_reports_degraded_when_seedvr2_runner_is_unavailable(tmp_path):
@@ -39,6 +48,12 @@ def test_health_reports_degraded_when_seedvr2_runner_is_unavailable(tmp_path):
     assert response.json() == {
         "status": "degraded",
         "runner": "unavailable",
+        "backend_id": "mac",
+        "display_name": "Mac M4 Pro",
+        "platform": "macos",
+        "accelerator": "Apple MPS",
+        "state": "offline",
+        "presets": ["3b-safe", "7b-fp8-experimental"],
     }
 
 
@@ -70,7 +85,8 @@ def test_built_frontend_is_served_at_root_without_capturing_api_routes(tmp_path)
 
     assert root.status_code == 200
     assert "Video Upscale WebUI" in root.text
-    assert health.json() == {"status": "ok", "runner": "ready"}
+    assert health.json()["status"] == "ok"
+    assert health.json()["backend_id"] == "mac"
 
 
 @pytest.mark.parametrize(
@@ -128,3 +144,55 @@ def test_state_change_requires_same_origin_request_header(tmp_path):
     response = client.post("/api/jobs/missing/cancel", headers=headers)
 
     assert response.status_code == 403
+
+
+def test_cuda_backend_reports_4090_capabilities_and_presets(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIDEO_UPSCALE_BACKEND_ID", "windows-4090")
+    monkeypatch.setenv("VIDEO_UPSCALE_BACKEND_DISPLAY_NAME", "Windows RTX 4090")
+    monkeypatch.setenv("VIDEO_UPSCALE_PLATFORM_NAME", "wsl2")
+    monkeypatch.setenv("VIDEO_UPSCALE_ACCELERATOR_NAME", "NVIDIA GeForce RTX 4090")
+    monkeypatch.setenv("VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "nvidia-cuda")
+    monkeypatch.setenv("VIDEO_UPSCALE_DEFAULT_PROFILE", "7b-fp8-quality")
+    client = TestClient(create_app(data_root=tmp_path, runner=ReadyRunner()))
+
+    health = client.get("/api/health").json()
+    config = client.get("/api/config", headers=operator_headers()).json()
+
+    assert health == {
+        "status": "ok",
+        "runner": "ready",
+        "backend_id": "windows-4090",
+        "display_name": "Windows RTX 4090",
+        "platform": "wsl2",
+        "accelerator": "NVIDIA GeForce RTX 4090",
+        "state": "ready",
+        "presets": ["7b-fp8-quality", "3b-fp8-fast"],
+    }
+    assert config["default_profile"] == "7b-fp8-quality"
+    assert config["presets"] == ["7b-fp8-quality", "3b-fp8-fast"]
+
+
+def test_windows_backend_allows_only_configured_mac_web_origin(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIDEO_UPSCALE_ALLOWED_WEB_ORIGIN", "https://mac.tailnet.ts.net:8444")
+    client = TestClient(create_app(data_root=tmp_path, runner=ReadyRunner()))
+
+    allowed = client.options(
+        "/api/jobs",
+        headers={
+            "Origin": "https://mac.tailnet.ts.net:8444",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Video-Upscale-Request",
+        },
+    )
+    rejected = client.options(
+        "/api/jobs",
+        headers={
+            "Origin": "https://attacker.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "https://mac.tailnet.ts.net:8444"
+    assert rejected.status_code == 400
+    assert "access-control-allow-origin" not in rejected.headers
