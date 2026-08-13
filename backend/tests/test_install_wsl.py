@@ -29,6 +29,8 @@ def test_wsl_installer_preserves_models_and_pins_reviewed_seedvr2_fork():
     assert 'UV_VERSION="0.10"' in installer
     assert '/home/linuxbrew/.linuxbrew/bin/uv' in installer
     assert '.local/share/uv/python/cpython-3.13-linux-x86_64-gnu/bin/python3.13' in installer
+    assert 'PRIVATE_PYTHON_ROOT="${VIDEO_UPSCALE_STATE_ROOT}/python/${VIDEO_UPSCALE_PYTHON_VERSION}"' in installer
+    assert 'rsync -a --delete' in installer
     assert 'python install "$VIDEO_UPSCALE_PYTHON_VERSION"' in installer
     assert 'runtime-requirements.cuda.lock' in installer
     assert "--require-hashes" in installer

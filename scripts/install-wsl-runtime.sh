@@ -60,6 +60,7 @@ else
   [[ "$($PYTHON_SOURCE -c 'import platform; print(platform.python_version())')" == "$VIDEO_UPSCALE_PYTHON_VERSION" ]] \
     || { echo "Python $VIDEO_UPSCALE_PYTHON_VERSION is required; set VIDEO_UPSCALE_PYTHON_SOURCE" >&2; exit 1; }
 fi
+PRIVATE_PYTHON_ROOT="${VIDEO_UPSCALE_STATE_ROOT}/python/${VIDEO_UPSCALE_PYTHON_VERSION}"
 
 if ((apply)); then
   [[ "$(id -u)" == 0 ]] || { echo "--apply must run as root" >&2; exit 1; }
@@ -124,7 +125,10 @@ if ((run_python_install)); then
   run env UV_PYTHON_INSTALL_DIR="$VIDEO_UPSCALE_STATE_ROOT/python" \
     "$UV_BIN" python install "$VIDEO_UPSCALE_PYTHON_VERSION"
 fi
-run "$UV_BIN" venv --clear --python "$PYTHON_SOURCE" "$VIDEO_UPSCALE_STATE_ROOT/backend-venv"
+run install -d -m 0755 "$PRIVATE_PYTHON_ROOT"
+run rsync -a --delete "$(dirname "$(dirname "$(readlink -f "$PYTHON_SOURCE")")")/" "$PRIVATE_PYTHON_ROOT/"
+PRIVATE_PYTHON="$PRIVATE_PYTHON_ROOT/bin/python3.13"
+run "$UV_BIN" venv --clear --python "$PRIVATE_PYTHON" "$VIDEO_UPSCALE_STATE_ROOT/backend-venv"
 run "$UV_BIN" pip install --python "$VIDEO_UPSCALE_STATE_ROOT/backend-venv/bin/python" \
   --require-hashes -r "/opt/video-upscale-webui/backend/requirements.lock"
 checkout "https://github.com/Comfy-Org/ComfyUI.git" "$COMFYUI_DIR" "$COMFYUI_REVISION"
@@ -135,7 +139,7 @@ if ((apply)); then
   git -C "$SEEDVR2_DIR" fetch --depth=1 upstream "$SEEDVR2_UPSTREAM_REVISION"
   git -C "$SEEDVR2_DIR" merge-base --is-ancestor "$SEEDVR2_UPSTREAM_REVISION" "$SEEDVR2_NODE_REVISION"
 fi
-run "$UV_BIN" venv --clear --python "$PYTHON_SOURCE" "$COMFYUI_DIR/.venv"
+run "$UV_BIN" venv --clear --python "$PRIVATE_PYTHON" "$COMFYUI_DIR/.venv"
 run "$UV_BIN" pip install --python "$COMFYUI_DIR/.venv/bin/python" --torch-backend cu128 \
   --require-hashes -r "/opt/video-upscale-webui/deploy/runtime-requirements.cuda.lock"
 
