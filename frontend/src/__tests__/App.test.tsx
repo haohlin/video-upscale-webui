@@ -419,7 +419,7 @@ describe("App", () => {
     await user.upload(input, new File(["movie"], "lake.mov", { type: "video/quicktime" }));
     await user.click(screen.getByRole("button", { name: "Start processing" }));
 
-    expect(await screen.findByText("Uploading to your Mac")).toBeVisible();
+    expect(await screen.findByText("Uploading to Mac M4 Pro")).toBeVisible();
     expect(screen.getByText("50.0 MB / 100.0 MB · 5.0 MB/s · server confirmed")).toBeVisible();
     expect(screen.getByRole("progressbar", { name: "Upload 50%" })).toHaveAttribute("aria-valuenow", "50");
   });

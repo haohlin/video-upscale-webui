@@ -266,7 +266,7 @@ def _safe_human_json(payload: object) -> bool:
 
 def forward_seedvr2_line(line: str) -> None:
     stripped = line.rstrip("\r\n")
-    if sys.platform == "darwin":
+    if os.environ.get("VIDEO_UPSCALE_DEVICE_BACKEND_CLASS") == "apple-mps":
         if stripped == CUDA_OPTIMIZATION_STATUS:
             print(MPS_OPTIMIZATION_STATUS, flush=True)
             return

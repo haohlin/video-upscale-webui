@@ -30,7 +30,7 @@ SERVICE_NAME="video-upscale-webui.service"
 if ((apply)); then
   [[ "$(id -u)" == 0 ]] || { echo "--apply must run as root" >&2; exit 1; }
   apt-get update
-  apt-get install -y ffmpeg git python3 python3-venv rsync
+  apt-get install -y curl ffmpeg git python3 python3-venv rsync
   id video-upscale >/dev/null 2>&1 || useradd --system --home-dir "$VIDEO_UPSCALE_STATE_ROOT" --shell /usr/sbin/nologin video-upscale
 fi
 

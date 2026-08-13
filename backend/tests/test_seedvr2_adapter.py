@@ -355,8 +355,9 @@ def test_adapter_flushes_harmless_human_output_immediately():
     output.assert_called_once_with("model-loading", flush=True)
 
 
-def test_adapter_replaces_cuda_install_advice_with_mps_status(capsys):
+def test_adapter_replaces_cuda_install_advice_with_mps_status(capsys, monkeypatch):
     adapter = load_adapter()
+    monkeypatch.setenv("VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "apple-mps")
 
     with patch.object(adapter.sys, "platform", "darwin"):
         adapter.forward_seedvr2_line(
@@ -370,6 +371,18 @@ def test_adapter_replaces_cuda_install_advice_with_mps_status(capsys):
     assert capsys.readouterr().out == (
         "Apple MPS uses PyTorch SDPA; CUDA-only SageAttention, Flash Attention, "
         "and Triton are not applicable.\n"
+    )
+
+
+def test_adapter_keeps_cuda_optimization_guidance_on_cuda(capsys, monkeypatch):
+    adapter = load_adapter()
+    monkeypatch.setenv("VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "nvidia-cuda")
+
+    adapter.forward_seedvr2_line(adapter.CUDA_OPTIMIZATION_STATUS)
+    adapter.forward_seedvr2_line(adapter.CUDA_OPTIMIZATION_ADVICE)
+
+    assert capsys.readouterr().out == (
+        adapter.CUDA_OPTIMIZATION_STATUS + "\n" + adapter.CUDA_OPTIMIZATION_ADVICE + "\n"
     )
 
 

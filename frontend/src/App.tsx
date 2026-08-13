@@ -51,6 +51,7 @@ const fallbackScaleOptions: RuntimeConfig["output_scales"] = [
 type UploadState = UploadProgress & {
   phase: "uploading" | "validating" | "paused";
   filename: string;
+  backendDisplayName: string;
 };
 
 function icon(name: "upload" | "play" | "x" | "download" | "trash" | "shield" | "check" | "spinner") {
@@ -132,7 +133,8 @@ function sortJobs(jobs: Job[]) {
 }
 
 function jobStageDetail(job: Job) {
-  if (job.status === "queued") return "Upload validated — waiting for the Mac queue";
+  const backendName = job.backend_display_name ?? "Mac M4 Pro";
+  if (job.status === "queued") return `Upload validated — waiting for the ${backendName} queue`;
   if (job.status === "preflight") {
     if (job.stage === "preflight-media") return "Preparing the 7B safety sample";
     if (job.stage === "seedvr2-start") return "7B safety probe is rendering";
@@ -142,7 +144,7 @@ function jobStageDetail(job: Job) {
   if (job.status === "running") {
     if (job.stage === "audio-remux") return "Finalizing MP4 and source audio";
     if (job.stage === "seedvr2-start") return "AI rendering in progress — no reliable percentage";
-    return "Preparing SeedVR2 on the Mac";
+    return `Preparing SeedVR2 on ${backendName}`;
   }
   return labelForStatus(job.status);
 }
@@ -206,7 +208,10 @@ export default function App() {
   );
   const multiBackend = backends.length > 1;
   const selectedBackend = useMemo(() => {
-    if (backendChoice !== "auto") return backends.find((backend) => backend.id === backendChoice) ?? null;
+    if (backendChoice !== "auto") {
+      const explicit = backends.find((backend) => backend.id === backendChoice) ?? null;
+      return explicit && backendReady[explicit.id] ? explicit : null;
+    }
     return [...backends]
       .sort((left, right) => left.preference - right.preference)
       .find((backend) => backendReady[backend.id]) ?? null;
@@ -317,12 +322,13 @@ export default function App() {
   const finishedJobs = useMemo(() => jobs.filter((job) => !isActive(job)), [jobs]);
   const monitoredJob = uploadState || resumeSessionId ? null : activeJobs[0] ?? finishedJobs[0] ?? null;
   const monitoredJobId = monitoredJob?.id;
+  const monitoredJobKey = monitoredJob ? `${monitoredJob.backend_id ?? "mac"}:${monitoredJob.id}` : null;
   const monitoredJobIsActive = monitoredJob ? isActive(monitoredJob) : false;
 
   useEffect(() => {
     debugOffsetRef.current = 0;
     setDebugText("");
-  }, [monitoredJobId]);
+  }, [monitoredJobKey]);
 
   useEffect(() => {
     if (!showDebugConsole || !monitoredJobId) return;
@@ -405,6 +411,7 @@ export default function App() {
     setUploadState({
       phase: "uploading",
       filename: selectedFile.name,
+      backendDisplayName: selectedBackend?.display_name ?? "selected backend",
       loaded: 0,
       total: selectedFile.size,
       bytesPerSecond: 0,
@@ -417,7 +424,12 @@ export default function App() {
         resumeSessionId: resumeSessionId ?? undefined,
         onSession: setResumeSessionId,
         onProgress: (progress) => {
-          setUploadState({ phase: "uploading", filename: selectedFile.name, ...progress });
+          setUploadState({
+            phase: "uploading",
+            filename: selectedFile.name,
+            backendDisplayName: selectedBackend.display_name,
+            ...progress,
+          });
         },
         onUploadComplete: () => {
           setUploadState((current) => current && {
@@ -430,7 +442,9 @@ export default function App() {
       const created = multiBackend
         ? { ...createdRaw, backend_id: selectedBackend.id, backend_display_name: selectedBackend.display_name }
         : createdRaw;
-      setJobs((current) => sortJobs([created, ...current.filter((job) => job.id !== created.id)]));
+      setJobs((current) => sortJobs([created, ...current.filter((job) => !(
+        job.id === created.id && job.backend_id === created.backend_id
+      ))]));
       setSelectedFile(null);
       setUploadState(null);
       setResumeSessionId(null);
@@ -673,7 +687,7 @@ export default function App() {
             <DebugConsole upload={uploadState} job={monitoredJob} text={debugText} />
           )}
           <div className="queue-footnote">
-            <span><i className="pulse-dot" /> MacBook Pro</span>
+            <span><i className="pulse-dot" /> {selectedBackend?.display_name ?? "No backend ready"}</span>
             <span>Single-job queue protects memory</span>
           </div>
         </section>
@@ -713,7 +727,7 @@ function UploadMonitor({ upload }: { upload: UploadState }) {
   return (
     <section className="upload-monitor" aria-live="polite">
       <div>
-        <strong>{isValidating ? "Validating on your Mac" : isPaused ? "Upload paused — resume available" : upload.retryAttempt > 0 ? `Retrying upload (${upload.retryAttempt}/3)` : "Uploading to your Mac"}</strong>
+        <strong>{isValidating ? `Validating on ${upload.backendDisplayName}` : isPaused ? "Upload paused — resume available" : upload.retryAttempt > 0 ? `Retrying upload (${upload.retryAttempt}/3)` : `Uploading to ${upload.backendDisplayName}`}</strong>
         <span>{isValidating ? "Transfer complete. Checking this video before queuing it." : `${formatBytes(upload.loaded)} / ${formatBytes(upload.total)} · ${isPaused ? "waiting to resume" : formatSpeed(upload.bytesPerSecond)} · server confirmed`}</span>
       </div>
       <div className="upload-progress" aria-label={`Upload ${progress}%`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
@@ -724,7 +738,7 @@ function UploadMonitor({ upload }: { upload: UploadState }) {
 function DebugConsole({ upload, job, text }: { upload: UploadState | null; job: Job | null; text: string }) {
   const localStatus = upload
     ? upload.phase === "validating"
-      ? "[Browser] Transfer complete. Mac is validating the video."
+      ? `[Browser] Transfer complete. ${upload.backendDisplayName} is validating the video.`
       : upload.phase === "paused"
         ? `[Browser] Upload paused at server-confirmed ${formatBytes(upload.loaded)} / ${formatBytes(upload.total)}. Resume is available.`
       : `[Browser] ${upload.retryAttempt > 0 ? `Retry ${upload.retryAttempt}/3; ` : ""}server confirmed ${formatBytes(upload.loaded)} / ${formatBytes(upload.total)} at ${formatSpeed(upload.bytesPerSecond)}.`

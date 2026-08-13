@@ -56,3 +56,14 @@ def test_backend_has_frozen_production_requirements_for_wsl_install():
     assert "--hash=sha256:" in requirements
     assert "fastapi==" in requirements
     assert "uvicorn==" in requirements
+
+
+def test_cuda_smoke_submits_and_waits_for_a_real_backend_job():
+    smoke = (ROOT / "scripts/smoke-cuda.sh").read_text()
+
+    assert "testsrc2=size=256x256:rate=5:duration=1" in smoke
+    assert 'preset="$1"' in smoke
+    assert 'POST' in smoke
+    assert 'Tailscale-User-Login' in smoke
+    assert 'status' in smoke
+    assert 'ffprobe' in smoke
