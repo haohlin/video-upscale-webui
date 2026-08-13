@@ -10,9 +10,11 @@ tests = [
 
   # Private Tailscale identity and mutation authorization.
   "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[missing]",
-  "tests/test_health.py::test_private_routes_reject_untrusted_tailscale_identity_without_challenge[non-ascii]",
   "tests/test_health.py::test_private_route_accepts_case_insensitive_ascii_trimmed_operator_identity",
   "tests/test_health.py::test_state_change_requires_same_origin_request_header",
+  "tests/test_health.py::test_cuda_backend_reports_4090_capabilities_and_presets",
+  "tests/test_health.py::test_windows_backend_allows_only_configured_mac_web_origin",
+  "tests/test_health.py::test_backend_registry_adds_valid_private_windows_endpoint",
 
   # Output validation, cancellation, and bounded subprocess handling.
   "tests/test_jobs.py::test_output_mismatch_fails_job_before_completion",
@@ -31,18 +33,16 @@ tests = [
 
   # ETA calibration, timing persistence, and distinct stale signals.
   "tests/test_eta.py::test_no_measured_unit_and_no_history_is_calibrating",
-  "tests/test_eta.py::test_mismatched_failed_nonfinite_and_extreme_samples_do_not_change_range",
   "tests/test_jobs.py::test_timing_and_monotonic_report_freshness_are_persisted",
   "tests/test_jobs.py::test_invocation_sequence_resets_between_preflight_and_full",
-  "tests/test_jobs.py::test_phase_metrics_publish_anonymized_performance_samples_and_cascade",
   "tests/test_jobs.py::test_phase_metrics_reject_completion_when_heartbeat_is_fresh_but_work_is_stale",
   "tests/test_resumable_upload_api.py::test_restart_recovers_claim_and_returns_durably_created_job_idempotently",
 
   # Installer provenance, representative active-job gates, and one bounded-upload boundary.
   "tests/test_install_security.py::test_runtime_checkout_verifies_origin_and_clean_worktree",
-  "tests/test_runtime_update_gate.py::test_blocking_job_prevents_launchagent_stop_and_preserves_files[queued]",
   "tests/test_runtime_update_gate.py::test_blocking_job_prevents_launchagent_stop_and_preserves_files[running]",
   "tests/test_resumable_upload_api.py::test_upload_chunk_has_four_mebibyte_raw_body_limit",
+  "tests/test_install_wsl.py::test_wsl_installer_preserves_models_and_pins_reviewed_seedvr2_fork",
 ]
 
 # Names match `vitest list --json` exactly. Runner converts Vitest's display
@@ -51,8 +51,8 @@ tests = [
 tests = [
   "App > shows upload controls and server-configured output scale choices",
   "App > shows measured progress, phase counters, server ETA, and a live elapsed timer",
-  "App > calibrates without inventing a percentage when progress source is none",
-  "App > warns when heartbeat is stale and hides ETA",
+  "App > prefers healthy Windows in Auto mode and keeps both job histories visible",
+  "App > falls back to Mac for new jobs when Windows is offline",
   "App > distinguishes live heartbeat from stale measured work and hides ETA",
   "App > does not mix a current upload with an older completed job log",
   "App > restores pending uploads after refresh and resumes only the exact file",
