@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 import pytest
+import json
 
 from app.main import create_app
 from app.runner import UnavailableRunner
@@ -196,3 +197,71 @@ def test_windows_backend_allows_only_configured_mac_web_origin(tmp_path, monkeyp
     assert allowed.headers["access-control-allow-origin"] == "https://mac.tailnet.ts.net:8444"
     assert rejected.status_code == 400
     assert "access-control-allow-origin" not in rejected.headers
+
+
+def test_backend_registry_defaults_to_current_backend(tmp_path):
+    client = TestClient(create_app(data_root=tmp_path, runner=ReadyRunner()))
+
+    response = client.get("/api/backends", headers=operator_headers())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "backends": [
+            {
+                "id": "mac",
+                "display_name": "Mac M4 Pro",
+                "api_base_url": "",
+                "preference": 100,
+            }
+        ]
+    }
+
+
+def test_backend_registry_adds_valid_private_windows_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "VIDEO_UPSCALE_BACKENDS_JSON",
+        json.dumps(
+            [
+                {
+                    "id": "windows-4090",
+                    "display_name": "Windows RTX 4090",
+                    "api_base_url": "https://windows.tailnet.ts.net:8444",
+                    "preference": 10,
+                }
+            ]
+        ),
+    )
+    client = TestClient(create_app(data_root=tmp_path, runner=ReadyRunner()))
+
+    response = client.get("/api/backends", headers=operator_headers())
+
+    assert response.json()["backends"] == [
+        {
+            "id": "windows-4090",
+            "display_name": "Windows RTX 4090",
+            "api_base_url": "https://windows.tailnet.ts.net:8444",
+            "preference": 10,
+        },
+        {
+            "id": "mac",
+            "display_name": "Mac M4 Pro",
+            "api_base_url": "",
+            "preference": 100,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"id": "mac", "display_name": "duplicate", "api_base_url": "https://x.ts.net", "preference": 1}],
+        [{"id": "windows", "display_name": "Windows", "api_base_url": "http://x.ts.net", "preference": 1}],
+        [{"id": "windows", "display_name": "Windows", "api_base_url": "https://u:p@x.ts.net", "preference": 1}],
+        [{"id": "windows", "display_name": "Windows", "api_base_url": "https://x.ts.net/path", "preference": 1}],
+    ],
+)
+def test_backend_registry_rejects_ambiguous_or_unsafe_descriptors(tmp_path, monkeypatch, payload):
+    monkeypatch.setenv("VIDEO_UPSCALE_BACKENDS_JSON", json.dumps(payload))
+
+    with pytest.raises(RuntimeError, match="backend registry"):
+        create_app(data_root=tmp_path, runner=ReadyRunner())

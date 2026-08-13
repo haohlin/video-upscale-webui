@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -18,6 +19,78 @@ PLATFORM_PRESETS = {
     "apple-mps": ("3b-safe", "7b-fp8-experimental"),
     "nvidia-cuda": ("7b-fp8-quality", "3b-fp8-fast"),
 }
+MAX_BACKENDS = 4
+MAX_BACKEND_LABEL_CHARS = 64
+
+
+@dataclass(frozen=True)
+class BackendDescriptor:
+    id: str
+    display_name: str
+    api_base_url: str
+    preference: int
+
+    def public_dict(self) -> dict[str, str | int]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "api_base_url": self.api_base_url,
+            "preference": self.preference,
+        }
+
+
+def _parse_backend_registry(
+    raw: str | None, current: BackendDescriptor
+) -> tuple[BackendDescriptor, ...]:
+    try:
+        payload = json.loads(raw) if raw else []
+        if type(payload) is not list or len(payload) > MAX_BACKENDS - 1:
+            raise ValueError
+        descriptors = [current]
+        ids = {current.id}
+        for item in payload:
+            if type(item) is not dict or set(item) != {
+                "id", "display_name", "api_base_url", "preference"
+            }:
+                raise ValueError
+            backend_id = item["id"]
+            display_name = item["display_name"]
+            api_base_url = item["api_base_url"]
+            preference = item["preference"]
+            if (
+                type(backend_id) is not str
+                or not BACKEND_ID_PATTERN.fullmatch(backend_id)
+                or backend_id in ids
+                or type(display_name) is not str
+                or not 1 <= len(display_name) <= MAX_BACKEND_LABEL_CHARS
+                or type(api_base_url) is not str
+                or type(preference) is not int
+                or not 0 <= preference <= 1000
+            ):
+                raise ValueError
+            parsed = urlsplit(api_base_url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError
+            ids.add(backend_id)
+            descriptors.append(
+                BackendDescriptor(
+                    id=backend_id,
+                    display_name=display_name,
+                    api_base_url=api_base_url.rstrip("/"),
+                    preference=preference,
+                )
+            )
+        return tuple(sorted(descriptors, key=lambda descriptor: descriptor.preference))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("Video Upscale backend registry is invalid") from error
 
 
 @dataclass(frozen=True)
@@ -60,6 +133,7 @@ class Settings:
     platform_name: str = "macos"
     accelerator_name: str = "Apple MPS"
     allowed_web_origin: str | None = None
+    backends: tuple[BackendDescriptor, ...] = ()
 
     @property
     def disk_reserve_bytes(self) -> int:
@@ -112,6 +186,9 @@ class Settings:
                 raise RuntimeError("Video Upscale allowed Web origin is invalid")
             allowed_web_origin = allowed_web_origin.rstrip("/")
         model_dir_value = os.environ.get("VIDEO_UPSCALE_SEEDVR2_MODEL_DIR")
+        backend_display_name = os.environ.get(
+            "VIDEO_UPSCALE_BACKEND_DISPLAY_NAME", "Mac M4 Pro"
+        )
         settings = cls(
             project_root=project_root,
             runtime_root=runtime_root,
@@ -179,14 +256,21 @@ class Settings:
                 os.environ.get("VIDEO_UPSCALE_MAX_JOB_ARTIFACT_BYTES", str(64 * 1024 * 1024 * 1024))
             ),
             backend_id=backend_id,
-            backend_display_name=os.environ.get(
-                "VIDEO_UPSCALE_BACKEND_DISPLAY_NAME", "Mac M4 Pro"
-            ),
+            backend_display_name=backend_display_name,
             platform_name=os.environ.get("VIDEO_UPSCALE_PLATFORM_NAME", "macos"),
             accelerator_name=os.environ.get(
                 "VIDEO_UPSCALE_ACCELERATOR_NAME", "Apple MPS"
             ),
             allowed_web_origin=allowed_web_origin,
+            backends=_parse_backend_registry(
+                os.environ.get("VIDEO_UPSCALE_BACKENDS_JSON"),
+                BackendDescriptor(
+                    id=backend_id,
+                    display_name=backend_display_name,
+                    api_base_url="",
+                    preference=100,
+                ),
+            ),
         )
         if settings.default_profile not in settings.presets:
             raise RuntimeError("Default processing profile is unavailable on this backend")
@@ -232,4 +316,5 @@ class Settings:
             platform_name=self.platform_name,
             accelerator_name=self.accelerator_name,
             allowed_web_origin=self.allowed_web_origin,
+            backends=self.backends,
         )

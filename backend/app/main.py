@@ -178,6 +178,12 @@ def create_app(
             ],
         }
 
+    @service.get("/api/backends")
+    def backends() -> dict[str, list[dict[str, str | int]]]:
+        return {
+            "backends": [descriptor.public_dict() for descriptor in settings.backends]
+        }
+
     @service.get("/api/jobs")
     def list_jobs() -> dict[str, list[dict[str, object]]]:
         return {"jobs": [jobs.public_job(job) for job in jobs.list_jobs()]}
