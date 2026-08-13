@@ -1,6 +1,16 @@
 import type { ColorCorrection, Health, Job, JobLogTail, OutputScale, PresetId, RuntimeConfig, UploadProgress } from "./types";
 
 const apiRoot = "/api";
+const uploadChunkBytes = 4 * 1024 * 1024;
+const maxChunkAttempts = 3;
+
+interface UploadSession {
+  id: string;
+  filename: string;
+  total_bytes: number;
+  accepted_bytes: number;
+  expires_at: string;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -57,49 +67,88 @@ export async function createJob(
   callbacks: {
     onProgress?: (progress: UploadProgress) => void;
     onUploadComplete?: () => void;
+    onSession?: (id: string) => void;
+    resumeSessionId?: string;
   } = {},
 ): Promise<Job> {
-  const form = new FormData();
-  form.append("video", video);
-  form.append("preset", preset);
-  form.append("color_correction", colorCorrection);
-  form.append("output_scale", String(outputScale));
+  const startedAt = performance.now();
+  const createSession = () => request<UploadSession>("/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: video.name,
+        total_bytes: video.size,
+        options: { preset, color_correction: colorCorrection, output_scale: outputScale },
+      }),
+    });
+  let session: UploadSession;
+  if (callbacks.resumeSessionId) {
+    try {
+      session = await request<UploadSession>(`/uploads/${encodeURIComponent(callbacks.resumeSessionId)}`, { method: "GET" });
+    } catch (error) {
+      if (!(error instanceof ApiError) || ![404, 410].includes(error.status ?? 0)) throw error;
+      session = await createSession();
+    }
+  } else {
+    session = await createSession();
+  }
+  if (session.total_bytes !== video.size || session.filename !== video.name) {
+    throw new ApiError("Selected file does not match resumable upload session", 409);
+  }
+  callbacks.onSession?.(session.id);
+  let confirmed = session.accepted_bytes;
+  const initialConfirmed = confirmed;
+  callbacks.onProgress?.({ loaded: confirmed, total: video.size, bytesPerSecond: 0, retryAttempt: 0 });
+  let conflicts = 0;
 
-  return new Promise<Job>((resolve, reject) => {
-    const startedAt = performance.now();
-    const request = new XMLHttpRequest();
-    request.open("POST", `${apiRoot}/jobs`);
-    request.setRequestHeader("Accept", "application/json");
-    request.setRequestHeader("X-Video-Upscale-Request", "1");
-
-    request.upload.onprogress = (event) => {
-      const total = event.lengthComputable ? event.total : video.size;
-      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1_000, 0.001);
-      callbacks.onProgress?.({
-        loaded: event.loaded,
-        total,
-        bytesPerSecond: event.loaded / elapsedSeconds,
-      });
-    };
-    request.upload.onloadend = () => callbacks.onUploadComplete?.();
-    request.onerror = () => reject(new ApiError("Upload connection failed"));
-    request.onabort = () => reject(new ApiError("Upload cancelled"));
-    request.onload = () => {
-      let payload: { detail?: string; message?: string } | Job | undefined;
+  while (confirmed < video.size) {
+    const end = Math.min(video.size, confirmed + uploadChunkBytes);
+    let uploaded = false;
+    for (let attempt = 0; attempt < maxChunkAttempts && !uploaded; attempt += 1) {
       try {
-        payload = request.responseText ? JSON.parse(request.responseText) as { detail?: string; message?: string } | Job : undefined;
-      } catch {
-        // A proxy or server error does not have to return JSON.
+        const next = await request<UploadSession>(`/uploads/${encodeURIComponent(session.id)}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "Upload-Offset": String(confirmed),
+          },
+          body: video.slice(confirmed, end),
+        });
+        if (!Number.isInteger(next.accepted_bytes) || next.accepted_bytes <= confirmed || next.accepted_bytes > end) {
+          throw new ApiError("Server returned an invalid upload offset");
+        }
+        confirmed = next.accepted_bytes;
+        uploaded = true;
+        const elapsedSeconds = Math.max((performance.now() - startedAt) / 1_000, 0.001);
+        callbacks.onProgress?.({ loaded: confirmed, total: video.size, bytesPerSecond: (confirmed - initialConfirmed) / elapsedSeconds, retryAttempt: 0 });
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          conflicts += 1;
+          if (conflicts > maxChunkAttempts) throw error;
+          const current = await request<UploadSession>(`/uploads/${encodeURIComponent(session.id)}`, { method: "GET" });
+          if (!Number.isInteger(current.accepted_bytes) || current.accepted_bytes < 0 || current.accepted_bytes > video.size) {
+            throw new ApiError("Server returned an invalid upload offset");
+          }
+          confirmed = current.accepted_bytes;
+          uploaded = true;
+          const elapsedSeconds = Math.max((performance.now() - startedAt) / 1_000, 0.001);
+          callbacks.onProgress?.({ loaded: confirmed, total: video.size, bytesPerSecond: (confirmed - initialConfirmed) / elapsedSeconds, retryAttempt: 0 });
+          continue;
+        }
+        const retryable = !(error instanceof ApiError) || error.status === undefined || error.status === 408 || error.status === 429 || error.status >= 500;
+        if (!retryable || attempt + 1 >= maxChunkAttempts) throw error;
+        callbacks.onProgress?.({
+          loaded: confirmed,
+          total: video.size,
+          bytesPerSecond: (confirmed - initialConfirmed) / Math.max((performance.now() - startedAt) / 1_000, 0.001),
+          retryAttempt: attempt + 1,
+        });
+        await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
       }
-      if (request.status < 200 || request.status >= 300) {
-        const errorPayload = payload as { detail?: string; message?: string } | undefined;
-        reject(new ApiError(errorPayload?.detail ?? errorPayload?.message ?? `Request failed (${request.status})`, request.status));
-        return;
-      }
-      resolve(payload as Job);
-    };
-    request.send(form);
-  });
+    }
+  }
+  callbacks.onUploadComplete?.();
+  return request<Job>(`/uploads/${encodeURIComponent(session.id)}/finalize`, { method: "POST" });
 }
 
 export async function cancelJob(id: string): Promise<Job> {

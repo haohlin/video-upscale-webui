@@ -101,6 +101,10 @@ afterEach(() => {
 
 describe("App", () => {
   beforeEach(() => {
+    getJobs.mockReset();
+    getHealth.mockReset();
+    getConfig.mockReset();
+    getJobLog.mockReset();
     getJobs.mockResolvedValue([]);
     getHealth.mockResolvedValue({ status: "ok" });
     getConfig.mockResolvedValue(runtimeConfig);
@@ -279,8 +283,8 @@ describe("App", () => {
   it("shows measured browser upload progress before a server job exists", async () => {
     const user = userEvent.setup();
     createJob.mockImplementation((async (...args: unknown[]) => {
-      const callbacks = args[4] as { onProgress?: (progress: { loaded: number; total: number; bytesPerSecond: number }) => void } | undefined;
-      callbacks?.onProgress?.({ loaded: 50 * 1024 * 1024, total: 100 * 1024 * 1024, bytesPerSecond: 5 * 1024 * 1024 });
+      const callbacks = args[4] as { onProgress?: (progress: { loaded: number; total: number; bytesPerSecond: number; retryAttempt: number }) => void } | undefined;
+      callbacks?.onProgress?.({ loaded: 50 * 1024 * 1024, total: 100 * 1024 * 1024, bytesPerSecond: 5 * 1024 * 1024, retryAttempt: 0 });
       return new Promise(() => undefined);
     }) as typeof api.createJob);
     render(<App />);
@@ -290,7 +294,7 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Start processing" }));
 
     expect(await screen.findByText("Uploading to your Mac")).toBeVisible();
-    expect(screen.getByText("50.0 MB / 100.0 MB · 5.0 MB/s")).toBeVisible();
+    expect(screen.getByText("50.0 MB / 100.0 MB · 5.0 MB/s · server confirmed")).toBeVisible();
     expect(screen.getByRole("progressbar", { name: "Upload 50%" })).toHaveAttribute("aria-valuenow", "50");
   });
 
@@ -307,8 +311,66 @@ describe("App", () => {
 
     await user.click(await screen.findByRole("button", { name: "Show debug console" }));
 
-    expect(await screen.findByText("Live debug console")).toBeVisible();
+    expect(await screen.findByText("Live job log")).toBeVisible();
+    expect(screen.getByText(/Job running-1/)).toBeVisible();
+    expect(screen.getByText("Polling every 2 seconds")).toBeVisible();
     expect(await screen.findByText(/SeedVR2 rendering started/)).toBeVisible();
     expect(getJobLog).toHaveBeenCalledWith("running-1", 0);
+  });
+
+  it("does not mix a current upload with an older completed job log", async () => {
+    getJobs.mockResolvedValue([jobFixture({ id: "old-job", status: "completed", output_filename: "old.mp4" })]);
+    createJob.mockImplementation((async (...args: unknown[]) => {
+      const callbacks = args[4] as { onProgress?: (progress: { loaded: number; total: number; bytesPerSecond: number; retryAttempt: number }) => void };
+      callbacks.onProgress?.({ loaded: 1, total: 5, bytesPerSecond: 1, retryAttempt: 0 });
+      return new Promise(() => undefined);
+    }) as typeof api.createJob);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.upload(await screen.findByLabelText("Choose video file"), new File(["movie"], "new.mov"));
+    await user.click(screen.getByRole("button", { name: "Start processing" }));
+    await user.click(screen.getByRole("button", { name: "Show debug console" }));
+
+    expect(await screen.findByText("Upload status")).toBeVisible();
+    expect(screen.getByText(/No server job yet/)).toBeVisible();
+    expect(screen.queryByText("Completed.")).not.toBeInTheDocument();
+    expect(getJobLog).not.toHaveBeenCalled();
+  });
+
+  it("labels completed output as historical and states backend validation reached 100", async () => {
+    getJobs.mockResolvedValue([jobFixture({ id: "done-1", status: "completed", output_filename: "done.mp4" })]);
+    getJobLog.mockResolvedValue({ text: "PROGRESS 99 audio-remux\n", next_offset: 24, size: 24, truncated: false });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Show debug console" }));
+
+    expect(await screen.findByText("Historical job log")).toBeVisible();
+    expect(screen.getByText("Fetched once · processing is not active")).toBeVisible();
+    expect(screen.getByText(/Backend validated output and recorded 100% completion/)).toBeVisible();
+    expect(screen.queryByText("Polling every 2 seconds")).not.toBeInTheDocument();
+  });
+
+  it("offers resume with the same server session after retries are exhausted", async () => {
+    const user = userEvent.setup();
+    createJob
+      .mockImplementationOnce((async (...args: unknown[]) => {
+        const callbacks = args[4] as { onSession?: (id: string) => void };
+        callbacks.onSession?.("upload-resume");
+        throw new Error("Upload connection failed after 3 attempts");
+      }) as typeof api.createJob)
+      .mockResolvedValueOnce(jobFixture({ id: "upload-resume" }));
+    render(<App />);
+
+    await user.upload(await screen.findByLabelText("Choose video file"), new File(["movie"], "new.mov"));
+    await user.click(screen.getByRole("button", { name: "Start processing" }));
+    expect(await screen.findByRole("button", { name: "Resume upload" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Resume upload" }));
+    expect(createJob).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: "new.mov" }), "3b-safe", "lab", 1,
+      expect.objectContaining({ resumeSessionId: "upload-resume" }),
+    );
   });
 });

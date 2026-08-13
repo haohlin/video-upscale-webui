@@ -68,6 +68,7 @@ export interface UploadProgress {
   loaded: number;
   total: number;
   bytesPerSecond: number;
+  retryAttempt: number;
 }
 
 export interface JobLogTail {

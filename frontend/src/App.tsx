@@ -37,7 +37,7 @@ const fallbackScaleOptions: RuntimeConfig["output_scales"] = [
 ];
 
 type UploadState = UploadProgress & {
-  phase: "uploading" | "validating";
+  phase: "uploading" | "validating" | "paused";
   filename: string;
 };
 
@@ -174,6 +174,7 @@ export default function App() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [uploadState, setUploadState] = useState<UploadState | null>(null);
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [showDebugConsole, setShowDebugConsole] = useState(false);
   const [debugText, setDebugText] = useState("");
   const debugOffsetRef = useRef(0);
@@ -225,10 +226,10 @@ export default function App() {
 
   const hasActiveJob = jobs.some(isActive);
   useEffect(() => {
-    if (!hasActiveJob) return;
+    if (!hasActiveJob && !showDebugConsole) return;
     const timer = window.setInterval(() => void refresh(), pollMs);
     return () => window.clearInterval(timer);
-  }, [hasActiveJob, refresh]);
+  }, [hasActiveJob, refresh, showDebugConsole]);
 
   const hasTimedActiveJob = jobs.some((job) => isActive(job) && Boolean(job.started_at));
   useEffect(() => {
@@ -239,7 +240,7 @@ export default function App() {
 
   const activeJobs = useMemo(() => jobs.filter(isActive), [jobs]);
   const finishedJobs = useMemo(() => jobs.filter((job) => !isActive(job)), [jobs]);
-  const monitoredJob = activeJobs[0] ?? finishedJobs[0] ?? null;
+  const monitoredJob = uploadState || resumeSessionId ? null : activeJobs[0] ?? finishedJobs[0] ?? null;
   const monitoredJobId = monitoredJob?.id;
   const monitoredJobIsActive = monitoredJob ? isActive(monitoredJob) : false;
 
@@ -275,6 +276,8 @@ export default function App() {
   const chooseFile = (file?: File) => {
     if (!file) return;
     setActionError(null);
+    setResumeSessionId(null);
+    setUploadState(null);
     setSelectedFile(file);
   };
 
@@ -289,9 +292,12 @@ export default function App() {
       loaded: 0,
       total: selectedFile.size,
       bytesPerSecond: 0,
+      retryAttempt: 0,
     });
     try {
       const created = await createJob(selectedFile, preset, colorCorrection, outputScale, {
+        resumeSessionId: resumeSessionId ?? undefined,
+        onSession: setResumeSessionId,
         onProgress: (progress) => {
           setUploadState({ phase: "uploading", filename: selectedFile.name, ...progress });
         },
@@ -306,10 +312,11 @@ export default function App() {
       setJobs((current) => sortJobs([created, ...current.filter((job) => job.id !== created.id)]));
       setSelectedFile(null);
       setUploadState(null);
+      setResumeSessionId(null);
       await refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Upload failed");
-      setUploadState(null);
+      setUploadState((current) => current && { ...current, phase: "paused", retryAttempt: 0 });
     } finally {
       setIsSubmitting(false);
     }
@@ -405,7 +412,7 @@ export default function App() {
                   <span>Expected output: {expectedDimension(sourceDimensions.width, outputScale)} × {expectedDimension(sourceDimensions.height, outputScale)}</span>
                 )}
               </div>
-              <button type="button" className="icon-button" aria-label="Remove selected video" disabled={isSubmitting} onClick={() => setSelectedFile(null)}>{icon("x")}</button>
+              <button type="button" className="icon-button" aria-label="Remove selected video" disabled={isSubmitting} onClick={() => { setSelectedFile(null); setResumeSessionId(null); setUploadState(null); }}>{icon("x")}</button>
             </section>
           )}
 
@@ -464,9 +471,9 @@ export default function App() {
 
           <button className="primary-button" type="submit" disabled={!selectedFile || isSubmitting}>
             {isSubmitting ? icon("spinner") : icon("play")}
-            {isSubmitting ? uploadState?.phase === "validating" ? "Validating video…" : "Uploading video…" : "Start processing"}
+            {isSubmitting ? uploadState?.phase === "validating" ? "Validating video…" : "Uploading video…" : resumeSessionId ? "Resume upload" : "Start processing"}
           </button>
-          <p className="settings-footnote">{formatScale(outputScale)} output. One job processes at a time. Work files clear automatically.</p>
+          <p className="settings-footnote">{formatScale(outputScale)} output. One job processes at a time. Results stay until you delete them.</p>
         </form>
 
         <section className="panel jobs-panel" aria-live="polite">
@@ -528,11 +535,12 @@ function PanelTitle({ number, title }: { number: string; title: string }) {
 function UploadMonitor({ upload }: { upload: UploadState }) {
   const progress = upload.total > 0 ? Math.min(100, Math.round((upload.loaded / upload.total) * 100)) : 0;
   const isValidating = upload.phase === "validating";
+  const isPaused = upload.phase === "paused";
   return (
     <section className="upload-monitor" aria-live="polite">
       <div>
-        <strong>{isValidating ? "Validating on your Mac" : "Uploading to your Mac"}</strong>
-        <span>{isValidating ? "Transfer complete. Checking this video before queuing it." : `${formatBytes(upload.loaded)} / ${formatBytes(upload.total)} · ${formatSpeed(upload.bytesPerSecond)}`}</span>
+        <strong>{isValidating ? "Validating on your Mac" : isPaused ? "Upload paused — resume available" : upload.retryAttempt > 0 ? `Retrying upload (${upload.retryAttempt}/3)` : "Uploading to your Mac"}</strong>
+        <span>{isValidating ? "Transfer complete. Checking this video before queuing it." : `${formatBytes(upload.loaded)} / ${formatBytes(upload.total)} · ${isPaused ? "waiting to resume" : formatSpeed(upload.bytesPerSecond)} · server confirmed`}</span>
       </div>
       <div className="upload-progress" aria-label={`Upload ${progress}%`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
     </section>
@@ -543,16 +551,25 @@ function DebugConsole({ upload, job, text }: { upload: UploadState | null; job: 
   const localStatus = upload
     ? upload.phase === "validating"
       ? "[Browser] Transfer complete. Mac is validating the video."
-      : `[Browser] Uploading ${formatBytes(upload.loaded)} / ${formatBytes(upload.total)} at ${formatSpeed(upload.bytesPerSecond)}.`
+      : upload.phase === "paused"
+        ? `[Browser] Upload paused at server-confirmed ${formatBytes(upload.loaded)} / ${formatBytes(upload.total)}. Resume is available.`
+      : `[Browser] ${upload.retryAttempt > 0 ? `Retry ${upload.retryAttempt}/3; ` : ""}server confirmed ${formatBytes(upload.loaded)} / ${formatBytes(upload.total)} at ${formatSpeed(upload.bytesPerSecond)}.`
     : null;
-  const jobStatus = job ? `[Job] ${jobStageDetail(job)}.` : "[Job] No server job yet. A job appears after upload and validation.";
+  const jobStatus = job ? `[Job ${job.id}] ${jobStageDetail(job)}.` : "[Job] No server job yet";
+  const title = upload ? "Upload status" : job && isActive(job) ? "Live job log" : "Historical job log";
+  const subtitle = upload
+    ? "Waiting for upload finalization"
+    : job && isActive(job)
+      ? "Polling every 2 seconds"
+      : "Fetched once · processing is not active";
+  const completion = job?.status === "completed" ? "[WebUI] Backend validated output and recorded 100% completion." : null;
   return (
-    <section className="debug-console" aria-label="Live debug console">
+    <section className="debug-console" aria-label={title}>
       <div className="debug-console__head">
-        <h3>Live debug console</h3>
-        <span>{job ? "Polling job log every 2 seconds" : "Waiting for job"}</span>
+        <h3>{title}</h3>
+        <span>{subtitle}</span>
       </div>
-      <pre>{[localStatus, jobStatus, text || "[Adapter] No output yet."].filter(Boolean).join("\n")}</pre>
+      <pre>{[localStatus, jobStatus, text || (upload ? null : "[Adapter] No output yet."), completion].filter(Boolean).join("\n")}</pre>
     </section>
   );
 }
