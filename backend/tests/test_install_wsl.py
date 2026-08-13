@@ -67,3 +67,13 @@ def test_cuda_smoke_submits_and_waits_for_a_real_backend_job():
     assert 'Tailscale-User-Login' in smoke
     assert 'status' in smoke
     assert 'ffprobe' in smoke
+
+
+def test_windows_tailscale_serve_script_is_private_and_exact_port_only():
+    serve = (ROOT / "scripts/setup-windows-tailscale-serve.ps1").read_text()
+
+    assert "tailscale serve" in serve
+    assert "--https" in serve
+    assert "127.0.0.1:8000" in serve
+    assert "tailscale funnel" not in serve.lower()
+    assert "8444" in serve
