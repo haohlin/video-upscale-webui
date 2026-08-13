@@ -25,8 +25,14 @@ def test_wsl_installer_preserves_models_and_pins_reviewed_seedvr2_fork():
     assert "hf_hub_download" in installer
     assert "sha256" in installer.lower()
     assert "useradd --system" in installer
-    assert "requirements.lock" in installer
-    assert "--index-url https://download.pytorch.org/whl/cu128" in installer
+    assert 'VIDEO_UPSCALE_PYTHON_VERSION="3.13.12"' in installer
+    assert 'UV_VERSION="0.10"' in installer
+    assert '/home/linuxbrew/.linuxbrew/bin/uv' in installer
+    assert '.local/share/uv/python/cpython-3.13-linux-x86_64-gnu/bin/python3.13' in installer
+    assert 'python install "$VIDEO_UPSCALE_PYTHON_VERSION"' in installer
+    assert 'runtime-requirements.cuda.lock' in installer
+    assert "--require-hashes" in installer
+    assert "--index-url https://download.pytorch.org/whl/cu128" not in installer
     assert "SELECT COUNT(*) FROM jobs" in installer
     assert "refusing runtime update while a queued or active job exists" in installer
     assert 'systemctl is-active --quiet "$SERVICE_NAME"' in installer

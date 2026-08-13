@@ -26,11 +26,45 @@ SEEDVR2_NODE_REVISION="67a7350959eb077d3184faac7afa5449d8cc30a5"
 SEEDVR2_UPSTREAM_REVISION="4490bd1f482e026674543386bb2a4d176da245b9"
 SEEDVR2_FORK_REPOSITORY="https://github.com/haohlin/ComfyUI-SeedVR2_VideoUpscaler.git"
 SERVICE_NAME="video-upscale-webui.service"
+VIDEO_UPSCALE_PYTHON_VERSION="3.13.12"
+UV_VERSION="0.10"
+
+if project_owner="$(stat -c '%U' "$PROJECT_ROOT" 2>/dev/null)"; then :; else
+  project_owner="$(stat -f '%Su' "$PROJECT_ROOT")"
+fi
+project_owner_home="$(python3 -c 'import pwd,sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)' "$project_owner")"
+UV_BIN="${VIDEO_UPSCALE_UV:-}"
+if [[ -z "$UV_BIN" ]]; then
+  for candidate in "$(command -v uv 2>/dev/null || true)" /home/linuxbrew/.linuxbrew/bin/uv \
+    "$project_owner_home/.local/bin/uv"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then UV_BIN="$candidate"; break; fi
+  done
+fi
+[[ -x "$UV_BIN" ]] || { echo "uv 0.10 is required; set VIDEO_UPSCALE_UV to an existing executable" >&2; exit 1; }
+[[ "$($UV_BIN --version)" == "uv ${UV_VERSION}."* ]] \
+  || { echo "uv ${UV_VERSION}.x is required" >&2; exit 1; }
+
+PYTHON_SOURCE="${VIDEO_UPSCALE_PYTHON_SOURCE:-}"
+if [[ -z "$PYTHON_SOURCE" ]]; then
+  for candidate in "$(command -v python3.13 2>/dev/null || true)" \
+    "$project_owner_home/.local/share/uv/python/cpython-3.13-linux-x86_64-gnu/bin/python3.13" \
+    /home/linuxbrew/.linuxbrew/bin/python3.13; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then PYTHON_SOURCE="$candidate"; break; fi
+  done
+fi
+if [[ ! -x "$PYTHON_SOURCE" ]]; then
+  run_python_install=1
+  PYTHON_SOURCE="${VIDEO_UPSCALE_STATE_ROOT}/python/cpython-3.13-linux-x86_64-gnu/bin/python3.13"
+else
+  run_python_install=0
+  [[ "$($PYTHON_SOURCE -c 'import platform; print(platform.python_version())')" == "$VIDEO_UPSCALE_PYTHON_VERSION" ]] \
+    || { echo "Python $VIDEO_UPSCALE_PYTHON_VERSION is required; set VIDEO_UPSCALE_PYTHON_SOURCE" >&2; exit 1; }
+fi
 
 if ((apply)); then
   [[ "$(id -u)" == 0 ]] || { echo "--apply must run as root" >&2; exit 1; }
   apt-get update
-  apt-get install -y curl ffmpeg git python3 python3-venv rsync
+  apt-get install -y curl ffmpeg git python3 rsync
   id video-upscale >/dev/null 2>&1 || useradd --system --home-dir "$VIDEO_UPSCALE_STATE_ROOT" --shell /usr/sbin/nologin video-upscale
 fi
 
@@ -86,8 +120,13 @@ run install -d -m 0750 -o video-upscale -g video-upscale \
 run install -d -m 0755 /opt/video-upscale-webui /etc/video-upscale-webui
 run rsync -a --delete --exclude .git --exclude .venv --exclude node_modules \
   --exclude __pycache__ --exclude deploy/runtime.env "$PROJECT_ROOT/" /opt/video-upscale-webui/
-run python3 -m venv "$VIDEO_UPSCALE_STATE_ROOT/backend-venv"
-run "$VIDEO_UPSCALE_STATE_ROOT/backend-venv/bin/pip" install --require-hashes -r "/opt/video-upscale-webui/backend/requirements.lock"
+if ((run_python_install)); then
+  run env UV_PYTHON_INSTALL_DIR="$VIDEO_UPSCALE_STATE_ROOT/python" \
+    "$UV_BIN" python install "$VIDEO_UPSCALE_PYTHON_VERSION"
+fi
+run "$UV_BIN" venv --clear --python "$PYTHON_SOURCE" "$VIDEO_UPSCALE_STATE_ROOT/backend-venv"
+run "$UV_BIN" pip install --python "$VIDEO_UPSCALE_STATE_ROOT/backend-venv/bin/python" \
+  --require-hashes -r "/opt/video-upscale-webui/backend/requirements.lock"
 checkout "https://github.com/Comfy-Org/ComfyUI.git" "$COMFYUI_DIR" "$COMFYUI_REVISION"
 checkout "$SEEDVR2_FORK_REPOSITORY" "$SEEDVR2_DIR" "$SEEDVR2_NODE_REVISION"
 
@@ -96,10 +135,9 @@ if ((apply)); then
   git -C "$SEEDVR2_DIR" fetch --depth=1 upstream "$SEEDVR2_UPSTREAM_REVISION"
   git -C "$SEEDVR2_DIR" merge-base --is-ancestor "$SEEDVR2_UPSTREAM_REVISION" "$SEEDVR2_NODE_REVISION"
 fi
-run python3 -m venv "$COMFYUI_DIR/.venv"
-run "$COMFYUI_DIR/.venv/bin/pip" install --index-url https://download.pytorch.org/whl/cu128 \
-  torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0
-run "$COMFYUI_DIR/.venv/bin/pip" install --require-hashes -r "/opt/video-upscale-webui/deploy/runtime-requirements.lock"
+run "$UV_BIN" venv --clear --python "$PYTHON_SOURCE" "$COMFYUI_DIR/.venv"
+run "$UV_BIN" pip install --python "$COMFYUI_DIR/.venv/bin/python" --torch-backend cu128 \
+  --require-hashes -r "/opt/video-upscale-webui/deploy/runtime-requirements.cuda.lock"
 
 download_model() {
   local model="$1"
