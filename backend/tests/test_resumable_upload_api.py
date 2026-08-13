@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -158,3 +159,74 @@ def test_finalize_rejection_discards_invalid_session_but_transient_error_keeps_i
     )
     assert transient_api.post(f"/api/uploads/{transient_id}/finalize").status_code == 503
     assert transient_api.get(f"/api/uploads/{transient_id}").status_code == 200
+
+
+def test_concurrent_finalize_claims_one_session_for_one_job(tmp_path):
+    """Allowing two finalizers to create two jobs must fail this test."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingProbe(ValidProbe):
+        def inspect(self, path):
+            entered.set()
+            assert release.wait(timeout=1)
+            return super().inspect(path)
+
+    app = create_app(
+        data_root=tmp_path,
+        runner=IdleRunner(),
+        media_probe=BlockingProbe(),
+        max_upload_bytes=16,
+    )
+    first = TestClient(app, headers={"Tailscale-User-Login": "haohan.apple@outlook.com", "X-Video-Upscale-Request": "1"})
+    second = TestClient(app, headers={"Tailscale-User-Login": "haohan.apple@outlook.com", "X-Video-Upscale-Request": "1"})
+    upload_id = create_session(first)["id"]
+    first.put(f"/api/uploads/{upload_id}", content=b"abcdef", headers={"Upload-Offset": "0"})
+    responses = []
+
+    thread = threading.Thread(target=lambda: responses.append(first.post(f"/api/uploads/{upload_id}/finalize")))
+    thread.start()
+    assert entered.wait(timeout=1)
+    second_thread = threading.Thread(
+        target=lambda: responses.append(second.post(f"/api/uploads/{upload_id}/finalize"))
+    )
+    second_thread.start()
+    release.set()
+    thread.join(timeout=1)
+    second_thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert not second_thread.is_alive()
+    assert sorted(response.status_code for response in responses) == [201, 409]
+    assert len(first.get("/api/jobs").json()["jobs"]) == 1
+
+
+def test_transient_finalization_store_failure_removes_input_link(tmp_path, monkeypatch):
+    """Leaving hard-linked input after unaccepted job must fail this test."""
+    api = client(tmp_path)
+    upload_id = create_session(api)["id"]
+    api.put(f"/api/uploads/{upload_id}", content=b"abcdef", headers={"Upload-Offset": "0"})
+    monkeypatch.setattr(
+        api.app.state.job_service.store,
+        "create",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("database temporarily unavailable")),
+    )
+
+    response = api.post(f"/api/uploads/{upload_id}/finalize")
+
+    assert response.status_code == 503
+    assert list((tmp_path / "inputs").iterdir()) == []
+    assert api.get(f"/api/uploads/{upload_id}").status_code == 200
+
+
+def test_create_upload_metadata_body_is_bounded_before_json_parsing(tmp_path):
+    """Parsing more than 64 KiB of session JSON must fail this test."""
+    api = client(tmp_path)
+
+    response = api.post(
+        "/api/uploads",
+        content=b"{" + b" " * (64 * 1024),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413

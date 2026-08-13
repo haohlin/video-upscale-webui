@@ -53,6 +53,7 @@ def create_app(
         UploadBodyGuard,
         max_body_bytes=settings.max_upload_bytes,
         max_chunk_bytes=4 * 1024 * 1024,
+        max_metadata_bytes=64 * 1024,
         has_disk_reserve=jobs.has_disk_reserve,
         has_queue_capacity=jobs.has_queue_capacity,
         upload_idle_timeout_seconds=settings.upload_idle_timeout_seconds,
@@ -220,7 +221,7 @@ def create_app(
     @service.post("/api/uploads/{upload_id}/finalize", status_code=201)
     async def finalize_upload(upload_id: str) -> dict[str, object]:
         try:
-            finalized = uploads.finalize(upload_id)
+            finalized = uploads.claim_finalization(upload_id)
             options = finalized.options
             job = await jobs.create_job_from_staged_file(
                 finalized.path,
@@ -234,12 +235,15 @@ def create_app(
             raise upload_error(error) from error
         except HTTPException as error:
             if error.status_code in {415, 422}:
-                uploads.discard(upload_id)
+                uploads.complete_finalization(upload_id)
+            else:
+                uploads.release_finalization(upload_id)
             raise
         except Exception:
+            uploads.release_finalization(upload_id)
             raise HTTPException(503, "Could not validate staged upload") from None
         try:
-            uploads.discard(upload_id)
+            uploads.complete_finalization(upload_id)
         except UploadSessionError:
             # Job has already been accepted; session cleanup will retry on restart.
             pass

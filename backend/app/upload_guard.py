@@ -27,6 +27,7 @@ class UploadBodyGuard:
         *,
         max_body_bytes: int,
         max_chunk_bytes: int = 4 * 1024 * 1024,
+        max_metadata_bytes: int = 64 * 1024,
         has_disk_reserve: Callable[[], bool],
         has_queue_capacity: Callable[[], bool] | None = None,
         upload_idle_timeout_seconds: float = 30,
@@ -35,6 +36,7 @@ class UploadBodyGuard:
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.max_chunk_bytes = max_chunk_bytes
+        self.max_metadata_bytes = max_metadata_bytes
         self.has_disk_reserve = has_disk_reserve
         self.has_queue_capacity = has_queue_capacity or (lambda: True)
         self.upload_idle_timeout_seconds = upload_idle_timeout_seconds
@@ -98,6 +100,8 @@ class UploadBodyGuard:
             return None
         if scope.get("method") == "POST" and scope.get("path") == "/api/jobs":
             return self.max_body_bytes
+        if scope.get("method") == "POST" and scope.get("path") == "/api/uploads":
+            return self.max_metadata_bytes
         if scope.get("method") == "PUT" and scope.get("path", "").startswith("/api/uploads/"):
             return self.max_chunk_bytes
         return None

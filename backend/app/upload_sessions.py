@@ -83,6 +83,7 @@ class UploadSessionService:
                     "accepted_bytes": 0,
                     "expires_at": expires_at.isoformat(),
                     "options": normalized_options,
+                    "finalizing": False,
                 }
                 try:
                     self._write_metadata(session_id, record)
@@ -133,9 +134,46 @@ class UploadSessionService:
                 options=self._options(record),
             )
 
+    def claim_finalization(self, session_id: str) -> FinalizedUpload:
+        with self._session_lock:
+            record = self._load(session_id)
+            if self._finalizing(record):
+                raise UploadSessionError(409, "Upload session finalization is already in progress")
+            accepted = self._integer(record, "accepted_bytes")
+            total = self._integer(record, "total_bytes")
+            if accepted != total:
+                raise UploadSessionError(409, "Upload is incomplete")
+            path = self._data_path(session_id)
+            self._verify_data_file(path, accepted)
+            record["finalizing"] = True
+            self._write_metadata(session_id, record)
+            return FinalizedUpload(
+                id=session_id,
+                filename=self._string(record, "filename"),
+                total_bytes=total,
+                accepted_bytes=accepted,
+                expires_at=self._string(record, "expires_at"),
+                path=path,
+                options=self._options(record),
+            )
+
+    def release_finalization(self, session_id: str) -> None:
+        with self._session_lock:
+            record = self._load(session_id)
+            if self._finalizing(record):
+                record["finalizing"] = False
+                self._write_metadata(session_id, record)
+
+    def complete_finalization(self, session_id: str) -> None:
+        with self._session_lock:
+            record = self._load(session_id)
+            self._remove_files(self._string(record, "id"))
+
     def discard(self, session_id: str) -> None:
         with self._session_lock:
             record = self._load(session_id)
+            if self._finalizing(record):
+                raise UploadSessionError(409, "Upload session finalization is already in progress")
             self._remove_files(self._string(record, "id"))
 
     def _load(self, session_id: str) -> dict[str, object]:
@@ -161,6 +199,7 @@ class UploadSessionService:
             raise UploadSessionError(409, "Upload session metadata is invalid")
         self._string(record, "filename")
         self._options(record)
+        self._finalizing(record)
         data_size = self._data_size(session_id)
         if data_size < accepted or data_size > total:
             raise UploadSessionError(409, "Unsafe upload staging file")
@@ -366,6 +405,13 @@ class UploadSessionService:
         if not isinstance(value, dict):
             raise UploadSessionError(409, "Upload session metadata is invalid")
         return dict(value)
+
+    @staticmethod
+    def _finalizing(record: dict[str, object]) -> bool:
+        value = record.get("finalizing", False)
+        if type(value) is not bool:
+            raise UploadSessionError(409, "Upload session metadata is invalid")
+        return value
 
     def _parse_expiry(self, record: dict[str, object]) -> datetime:
         try:

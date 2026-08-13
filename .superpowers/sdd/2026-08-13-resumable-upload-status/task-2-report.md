@@ -22,3 +22,10 @@ uv run --project backend pytest -q backend/tests/test_resumable_upload_api.py \
 Result: `12 passed` (one upstream Starlette `TestClient` deprecation warning).
 
 Concern: a manually launched broad legacy pytest process remained alive after reporting results due to existing background-worker test behavior; it was stopped. Focused suite exits normally.
+
+## Review-fix round
+
+- Session metadata now stores an atomic `finalizing` claim. Concurrent finalization receives `409`; one session creates at most one job.
+- Staged hard links are removed when job-store acceptance fails, while session staging remains available for transient retry.
+- Raw `POST /api/uploads` bodies are capped at 64 KiB before FastAPI JSON parsing.
+- Added RED-first tests for all three boundaries. Final capped command ran 14 tests and passed.

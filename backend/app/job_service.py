@@ -165,20 +165,25 @@ class JobService:
             f"scale={output_scale:g}:batch=5:chunk=25:overlap=4:"
             "dit_cache=disabled:vae_cache=disabled"
         )
-        job = self.store.create(
-            job_id=job_id,
-            original_filename=Path(original_filename).name,
-            input_path=input_path,
-            output_path=self.store.results / f"{job_id}.mp4",
-            log_path=self.store.logs / f"{job_id}.log",
-            preset=preset,
-            color_correction=color_correction,
-            media=media,
-            output_scale=output_scale,
-            target_width=target_width,
-            target_height=target_height,
-            runtime_profile_fingerprint=runtime_profile_fingerprint,
-        )
+        try:
+            job = self.store.create(
+                job_id=job_id,
+                original_filename=Path(original_filename).name,
+                input_path=input_path,
+                output_path=self.store.results / f"{job_id}.mp4",
+                log_path=self.store.logs / f"{job_id}.log",
+                preset=preset,
+                color_correction=color_correction,
+                media=media,
+                output_scale=output_scale,
+                target_width=target_width,
+                target_height=target_height,
+                runtime_profile_fingerprint=runtime_profile_fingerprint,
+            )
+        except Exception:
+            if move_staged_file:
+                input_path.unlink(missing_ok=True)
+            raise
         self._ensure_worker()
         return job
 
