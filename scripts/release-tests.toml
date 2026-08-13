@@ -4,7 +4,7 @@ max_tests = 49
 [backend]
 tests = [
   # Scale admission and deterministic target sizing.
-  "tests/test_jobs.py::test_upload_defaults_to_original_resolution_and_exposes_target_dimensions",
+  "tests/test_resumable_upload_api.py::test_upload_routes_require_operator_and_mutation_header",
   "tests/test_jobs.py::test_upload_rejects_non_allowlisted_output_scale[1;touch /tmp/pwned]",
   "tests/test_jobs.py::test_target_dimensions_enforce_edge_and_pixel_ceiling[4096-2160-2.0-Target longest edge must not exceed 7680 pixels]",
 
@@ -36,13 +36,13 @@ tests = [
   "tests/test_jobs.py::test_invocation_sequence_resets_between_preflight_and_full",
   "tests/test_jobs.py::test_phase_metrics_publish_anonymized_performance_samples_and_cascade",
   "tests/test_jobs.py::test_phase_metrics_reject_completion_when_heartbeat_is_fresh_but_work_is_stale",
-  "tests/test_jobs.py::test_api_eta_exposes_measured_source_from_completed_current_run_chunks",
+  "tests/test_resumable_upload_api.py::test_restart_recovers_claim_and_returns_durably_created_job_idempotently",
 
   # Installer provenance, representative active-job gates, and one bounded-upload boundary.
   "tests/test_install_security.py::test_runtime_checkout_verifies_origin_and_clean_worktree",
   "tests/test_runtime_update_gate.py::test_blocking_job_prevents_launchagent_stop_and_preserves_files[queued]",
   "tests/test_runtime_update_gate.py::test_blocking_job_prevents_launchagent_stop_and_preserves_files[running]",
-  "tests/test_upload_guard.py::test_chunked_upload_is_rejected_before_downstream_multipart_parser_can_read_past_limit",
+  "tests/test_resumable_upload_api.py::test_upload_chunk_has_four_mebibyte_raw_body_limit",
 ]
 
 # Names match `vitest list --json` exactly. Runner converts Vitest's display
@@ -50,15 +50,15 @@ tests = [
 [frontend]
 tests = [
   "App > shows upload controls and server-configured output scale choices",
-  "App > submits selected video and server-configured output scale",
-  "App > uses runtime-configured defaults instead of hard-coded UI defaults",
-  "App > previews local output dimensions and revokes object URLs on replacement and unmount",
   "App > shows measured progress, phase counters, server ETA, and a live elapsed timer",
   "App > calibrates without inventing a percentage when progress source is none",
   "App > warns when heartbeat is stale and hides ETA",
   "App > distinguishes live heartbeat from stale measured work and hides ETA",
-  "createJob > uses browser upload events to report measured transfer progress",
-  "createJob > submits the selected output scale in multipart form data",
+  "App > does not mix a current upload with an older completed job log",
+  "App > labels completed output as historical and states backend validation reached 100",
+  "App > offers resume with the same server session after retries are exhausted",
+  "createJob > uploads fixed chunks and reports only server-confirmed bytes",
+  "createJob > retries a transient chunk failure without advancing confirmed offset",
 ]
 
 # Two lifecycle contracts plus one regression for each reviewed security finding:
