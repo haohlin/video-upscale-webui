@@ -220,11 +220,19 @@ def create_app(
 
     @service.post("/api/uploads/{upload_id}/finalize", status_code=201)
     async def finalize_upload(upload_id: str) -> dict[str, object]:
+        existing = jobs.find_job(upload_id)
+        if existing is not None:
+            try:
+                uploads.complete_finalization(upload_id)
+            except UploadSessionError:
+                pass
+            return jobs.public_job(existing)
         try:
             finalized = uploads.claim_finalization(upload_id)
             options = finalized.options
             job = await jobs.create_job_from_staged_file(
                 finalized.path,
+                job_id=upload_id,
                 original_filename=finalized.filename,
                 total_bytes=finalized.total_bytes,
                 preset=options.get("preset"),  # type: ignore[arg-type]

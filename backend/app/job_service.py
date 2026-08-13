@@ -97,6 +97,7 @@ class JobService:
         self,
         path: Path,
         *,
+        job_id: str | None = None,
         original_filename: str,
         total_bytes: int,
         preset: str | None,
@@ -106,6 +107,7 @@ class JobService:
         """Validate an accepted resumable upload through the normal job path."""
         return await self._create_job_from_staged_file(
             path,
+            job_id=job_id,
             original_filename=original_filename,
             total_bytes=total_bytes,
             preset=preset,
@@ -118,6 +120,7 @@ class JobService:
         self,
         path: Path,
         *,
+        job_id: str | None = None,
         original_filename: str,
         total_bytes: int,
         preset: str | None,
@@ -151,7 +154,7 @@ class JobService:
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
 
-        job_id = str(uuid.uuid4()) if move_staged_file else path.stem
+        job_id = job_id or (str(uuid.uuid4()) if move_staged_file else path.stem)
         input_path = self.store.inputs / f"{job_id}{suffix}" if move_staged_file else path
         try:
             if move_staged_file:
@@ -230,6 +233,9 @@ class JobService:
         if not job:
             raise HTTPException(404, "Job not found")
         return job
+
+    def find_job(self, job_id: str) -> Job | None:
+        return self.store.get(job_id)
 
     def list_jobs(self) -> list[Job]:
         return self.store.list()

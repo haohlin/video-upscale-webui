@@ -230,3 +230,47 @@ def test_create_upload_metadata_body_is_bounded_before_json_parsing(tmp_path):
     )
 
     assert response.status_code == 413
+
+
+def test_restart_recovers_claim_and_returns_durably_created_job_idempotently(tmp_path, monkeypatch):
+    """Keeping crash claims or recreating an accepted session job must fail this test."""
+    claimed_api = client(tmp_path / "claimed")
+    claimed_id = create_session(claimed_api)["id"]
+    claimed_api.put(f"/api/uploads/{claimed_id}", content=b"abcdef", headers={"Upload-Offset": "0"})
+    claimed_api.app.state.upload_session_service.claim_finalization(claimed_id)
+
+    after_claim_restart = client(tmp_path / "claimed")
+    recovered = after_claim_restart.post(f"/api/uploads/{claimed_id}/finalize")
+
+    assert recovered.status_code == 201
+    assert recovered.json()["id"] == claimed_id
+
+    accepted_api = client(tmp_path / "accepted")
+    accepted_id = create_session(accepted_api)["id"]
+    accepted_api.put(f"/api/uploads/{accepted_id}", content=b"abcdef", headers={"Upload-Offset": "0"})
+    original_cleanup = accepted_api.app.state.upload_session_service.complete_finalization
+    monkeypatch.setattr(
+        accepted_api.app.state.upload_session_service,
+        "complete_finalization",
+        lambda upload_id: (_ for _ in ()).throw(OSError("crash before session cleanup")),
+    )
+    crashing = TestClient(
+        accepted_api.app,
+        headers={"Tailscale-User-Login": "haohan.apple@outlook.com", "X-Video-Upscale-Request": "1"},
+        raise_server_exceptions=False,
+    )
+    assert crashing.post(f"/api/uploads/{accepted_id}/finalize").status_code == 500
+    monkeypatch.setattr(
+        accepted_api.app.state.upload_session_service,
+        "complete_finalization",
+        original_cleanup,
+    )
+
+    after_accept_restart = client(tmp_path / "accepted")
+    repeated = after_accept_restart.post(f"/api/uploads/{accepted_id}/finalize")
+
+    assert repeated.status_code == 201
+    assert repeated.json()["id"] == accepted_id
+    assert len(after_accept_restart.get("/api/jobs").json()["jobs"]) == 1
+    assert [path.stem for path in (tmp_path / "accepted" / "inputs").iterdir()] == [accepted_id]
+    assert after_accept_restart.get(f"/api/uploads/{accepted_id}").status_code == 404

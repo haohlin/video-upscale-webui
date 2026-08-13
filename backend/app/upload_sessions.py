@@ -52,6 +52,7 @@ class UploadSessionService:
         self._now = now or (lambda: datetime.now(UTC))
         self._session_lock = threading.RLock()
         self.staging.mkdir(parents=True, exist_ok=True)
+        self._recover_finalizing_claims()
 
     def create(
         self,
@@ -331,6 +332,21 @@ class UploadSessionService:
                     record = self._read_json(metadata_path)
                     if self._parse_expiry(record) <= self._utc_now():
                         self._remove_files(session_id)
+                except (OSError, ValueError, json.JSONDecodeError, UploadSessionError):
+                    continue
+
+    def _recover_finalizing_claims(self) -> None:
+        """Clear claims left by a stopped single-process server before retry."""
+        with self._session_lock:
+            for metadata_path in self.staging.glob("*.json"):
+                session_id = metadata_path.stem
+                if not SESSION_ID_PATTERN.fullmatch(session_id):
+                    continue
+                try:
+                    record = self._read_json(metadata_path)
+                    if self._finalizing(record):
+                        record["finalizing"] = False
+                        self._write_metadata(session_id, record)
                 except (OSError, ValueError, json.JSONDecodeError, UploadSessionError):
                     continue
 

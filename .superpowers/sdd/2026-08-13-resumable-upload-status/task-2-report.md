@@ -29,3 +29,10 @@ Concern: a manually launched broad legacy pytest process remained alive after re
 - Staged hard links are removed when job-store acceptance fails, while session staging remains available for transient retry.
 - Raw `POST /api/uploads` bodies are capped at 64 KiB before FastAPI JSON parsing.
 - Added RED-first tests for all three boundaries. Final capped command ran 14 tests and passed.
+
+## Crash/restart round
+
+- Resumable finalization now uses the upload session ID as its durable job ID.
+- Startup clears claims left by a stopped single-process server.
+- Finalization returns an existing stable-ID job and removes any leftover session state, so a crash after durable job insertion cannot create a duplicate job or input.
+- RED restart test covered a crash after claim and a crash after durable job creation before session cleanup. Capped command: `14 passed`.
