@@ -1,4 +1,4 @@
-import type { ColorCorrection, Health, Job, JobLogTail, OutputScale, PresetId, RuntimeConfig, UploadProgress, UploadSession } from "./types";
+import type { BackendDescriptor, ColorCorrection, Health, Job, JobLogTail, OutputScale, PresetId, RuntimeConfig, UploadProgress, UploadSession } from "./types";
 
 const apiRoot = "/api";
 const uploadChunkBytes = 4 * 1024 * 1024;
@@ -14,8 +14,8 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiRoot}${path}`, {
+async function requestAt<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${baseUrl}${apiRoot}${path}`, {
     ...init,
     headers: {
       Accept: "application/json",
@@ -37,6 +37,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return requestAt<T>("", path, init);
+}
+
+export function createApiClient(descriptor: BackendDescriptor) {
+  const baseUrl = descriptor.api_base_url.replace(/\/$/, "");
+  return {
+    descriptor,
+    getHealth: () => requestAt<Health>(baseUrl, "/health"),
+    getConfig: () => requestAt<RuntimeConfig>(baseUrl, "/config"),
+    getJobs: async () => (await requestAt<{ jobs: Job[] }>(baseUrl, "/jobs")).jobs,
+    getUploads: async () => (await requestAt<{ uploads: UploadSession[] }>(baseUrl, "/uploads")).uploads,
+    createJob: (video: File, preset: PresetId, colorCorrection: ColorCorrection, outputScale: OutputScale, callbacks: UploadCallbacks = {}) =>
+      createJobAt(baseUrl, video, preset, colorCorrection, outputScale, callbacks),
+    discardUpload: (id: string) => requestAt<void>(baseUrl, `/uploads/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    cancelJob: (id: string) => requestAt<Job>(baseUrl, `/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+    deleteJob: (id: string) => requestAt<void>(baseUrl, `/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    getJobLog: (id: string, offset: number) => requestAt<JobLogTail>(baseUrl, `/jobs/${encodeURIComponent(id)}/log?offset=${Math.max(0, Math.floor(offset))}`),
+    downloadUrl: (id: string) => `${baseUrl}${apiRoot}/jobs/${encodeURIComponent(id)}/download`,
+  };
+}
+
+export async function getBackends(): Promise<BackendDescriptor[]> {
+  return (await request<{ backends: BackendDescriptor[] }>("/backends")).backends;
 }
 
 export async function getHealth(): Promise<Health> {
@@ -66,15 +92,28 @@ export async function createJob(
   preset: PresetId,
   colorCorrection: ColorCorrection,
   outputScale: OutputScale,
-  callbacks: {
-    onProgress?: (progress: UploadProgress) => void;
-    onUploadComplete?: () => void;
-    onSession?: (id: string) => void;
-    resumeSessionId?: string;
-  } = {},
+  callbacks: UploadCallbacks = {},
+): Promise<Job> {
+  return createJobAt("", video, preset, colorCorrection, outputScale, callbacks);
+}
+
+export interface UploadCallbacks {
+  onProgress?: (progress: UploadProgress) => void;
+  onUploadComplete?: () => void;
+  onSession?: (id: string) => void;
+  resumeSessionId?: string;
+}
+
+async function createJobAt(
+  baseUrl: string,
+  video: File,
+  preset: PresetId,
+  colorCorrection: ColorCorrection,
+  outputScale: OutputScale,
+  callbacks: UploadCallbacks,
 ): Promise<Job> {
   const startedAt = performance.now();
-  const createSession = () => request<UploadSession>("/uploads", {
+  const createSession = () => requestAt<UploadSession>(baseUrl, "/uploads", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -86,7 +125,7 @@ export async function createJob(
   let session: UploadSession;
   if (callbacks.resumeSessionId) {
     try {
-      session = await request<UploadSession>(`/uploads/${encodeURIComponent(callbacks.resumeSessionId)}`, { method: "GET" });
+      session = await requestAt<UploadSession>(baseUrl, `/uploads/${encodeURIComponent(callbacks.resumeSessionId)}`, { method: "GET" });
     } catch (error) {
       if (!(error instanceof ApiError) || ![404, 410].includes(error.status ?? 0)) throw error;
       session = await createSession();
@@ -108,7 +147,7 @@ export async function createJob(
     let uploaded = false;
     for (let attempt = 0; attempt < maxChunkAttempts && !uploaded; attempt += 1) {
       try {
-        const next = await request<UploadSession>(`/uploads/${encodeURIComponent(session.id)}`, {
+        const next = await requestAt<UploadSession>(baseUrl, `/uploads/${encodeURIComponent(session.id)}`, {
           method: "PUT",
           headers: {
             "Content-Type": "application/octet-stream",
@@ -127,7 +166,7 @@ export async function createJob(
         if (error instanceof ApiError && error.status === 409) {
           conflicts += 1;
           if (conflicts > maxChunkAttempts) throw error;
-          const current = await request<UploadSession>(`/uploads/${encodeURIComponent(session.id)}`, { method: "GET" });
+          const current = await requestAt<UploadSession>(baseUrl, `/uploads/${encodeURIComponent(session.id)}`, { method: "GET" });
           if (!Number.isInteger(current.accepted_bytes) || current.accepted_bytes < 0 || current.accepted_bytes > video.size) {
             throw new ApiError("Server returned an invalid upload offset");
           }
@@ -150,7 +189,7 @@ export async function createJob(
     }
   }
   callbacks.onUploadComplete?.();
-  return request<Job>(`/uploads/${encodeURIComponent(session.id)}/finalize`, { method: "POST" });
+  return requestAt<Job>(baseUrl, `/uploads/${encodeURIComponent(session.id)}/finalize`, { method: "POST" });
 }
 
 export async function cancelJob(id: string): Promise<Job> {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createJob, discardUpload, getUploads } from "../api";
+import { createApiClient, createJob, discardUpload, getBackends, getUploads } from "../api";
 
 const session = {
   id: "upload-1",
@@ -120,5 +120,46 @@ describe("pending uploads", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/uploads", expect.any(Object));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/uploads/upload-1", expect.objectContaining({ method: "DELETE" }));
+  });
+});
+
+describe("independent backend clients", () => {
+  it("routes every resource operation to its configured backend", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response(200, { jobs: [createdJob] }))
+      .mockResolvedValueOnce(response(200, createdJob))
+      .mockResolvedValueOnce(response(200, { text: "ok", next_offset: 2, size: 2, truncated: false }));
+    vi.stubGlobal("fetch", fetchMock);
+    const windows = createApiClient({
+      id: "windows-4090",
+      display_name: "Windows RTX 4090",
+      api_base_url: "https://windows.tailnet.ts.net:8444",
+      preference: 10,
+    });
+
+    await windows.getJobs();
+    await windows.cancelJob("job one");
+    await windows.getJobLog("job one", 2);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://windows.tailnet.ts.net:8444/api/jobs",
+      "https://windows.tailnet.ts.net:8444/api/jobs/job%20one/cancel",
+      "https://windows.tailnet.ts.net:8444/api/jobs/job%20one/log?offset=2",
+    ]);
+    expect(windows.downloadUrl("job one")).toBe(
+      "https://windows.tailnet.ts.net:8444/api/jobs/job%20one/download",
+    );
+  });
+
+  it("loads backend registry from current Mac origin", async () => {
+    const backends = [
+      { id: "windows-4090", display_name: "Windows RTX 4090", api_base_url: "https://windows.ts.net", preference: 10 },
+      { id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 },
+    ];
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(200, { backends }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getBackends()).resolves.toEqual(backends);
+    expect(fetchMock).toHaveBeenCalledWith("/api/backends", expect.any(Object));
   });
 });

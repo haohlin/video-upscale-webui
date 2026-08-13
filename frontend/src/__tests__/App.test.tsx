@@ -6,6 +6,8 @@ import * as api from "../api";
 import type { Job, RuntimeConfig, UploadSession } from "../types";
 
 vi.mock("../api", () => ({
+  createApiClient: vi.fn(),
+  getBackends: vi.fn(),
   createJob: vi.fn(),
   deleteJob: vi.fn(),
   getJobs: vi.fn(),
@@ -25,6 +27,8 @@ const getConfig = vi.mocked(api.getConfig);
 const getJobLog = vi.mocked(api.getJobLog);
 const createJob = vi.mocked(api.createJob);
 const discardUpload = vi.mocked(api.discardUpload);
+const getBackends = vi.mocked(api.getBackends);
+const createApiClient = vi.mocked(api.createApiClient);
 
 const pendingUpload: UploadSession = {
   id: "upload-pending",
@@ -113,6 +117,8 @@ afterEach(() => {
 
 describe("App", () => {
   beforeEach(() => {
+    getBackends.mockReset();
+    createApiClient.mockReset();
     getJobs.mockReset();
     getUploads.mockReset();
     getHealth.mockReset();
@@ -123,8 +129,53 @@ describe("App", () => {
     getHealth.mockResolvedValue({ status: "ok" });
     getConfig.mockResolvedValue(runtimeConfig);
     getJobLog.mockResolvedValue({ text: "", next_offset: 0, size: 0, truncated: false });
+    getBackends.mockResolvedValue([{ id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 }]);
     createJob.mockReset();
     discardUpload.mockReset();
+  });
+
+  it("prefers healthy Windows in Auto mode and keeps both job histories visible", async () => {
+    const windowsJob = jobFixture({ id: "win-job", original_filename: "windows.mov" });
+    const macJob = jobFixture({ id: "mac-job", original_filename: "mac.mov", status: "completed" });
+    getBackends.mockResolvedValue([
+      { id: "windows-4090", display_name: "Windows RTX 4090", api_base_url: "https://windows.ts.net", preference: 10 },
+      { id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 },
+    ]);
+    createApiClient.mockImplementation((descriptor) => ({
+      descriptor,
+      getHealth: vi.fn().mockResolvedValue({ status: "ok", backend_id: descriptor.id }),
+      getConfig: vi.fn().mockResolvedValue(descriptor.id === "windows-4090" ? { ...runtimeConfig, default_profile: "7b-fp8-quality", presets: ["7b-fp8-quality", "3b-fp8-fast"] } : runtimeConfig),
+      getJobs: vi.fn().mockResolvedValue(descriptor.id === "windows-4090" ? [windowsJob] : [macJob]),
+      getUploads: vi.fn().mockResolvedValue([]),
+      createJob: vi.fn(), discardUpload: vi.fn(), cancelJob: vi.fn(), deleteJob: vi.fn(), getJobLog: vi.fn(),
+      downloadUrl: vi.fn((id: string) => `${descriptor.api_base_url}/api/jobs/${id}/download`),
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByRole("combobox", { name: "Processing host" })).toHaveValue("auto");
+    expect(await screen.findByText("windows.mov")).toBeVisible();
+    expect(screen.getByText("mac.mov")).toBeVisible();
+    expect(screen.getAllByText("Windows RTX 4090").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Mac M4 Pro/).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole("radio", { name: /SeedVR2 7B FP8 Quality/i })).toBeChecked());
+  });
+
+  it("falls back to Mac for new jobs when Windows is offline", async () => {
+    getBackends.mockResolvedValue([
+      { id: "windows-4090", display_name: "Windows RTX 4090", api_base_url: "https://windows.ts.net", preference: 10 },
+      { id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 },
+    ]);
+    createApiClient.mockImplementation((descriptor) => ({
+      descriptor,
+      getHealth: descriptor.id === "windows-4090" ? vi.fn().mockRejectedValue(new Error("offline")) : vi.fn().mockResolvedValue({ status: "ok" }),
+      getConfig: vi.fn().mockResolvedValue(runtimeConfig), getJobs: vi.fn().mockResolvedValue([]), getUploads: vi.fn().mockResolvedValue([]),
+      createJob: vi.fn(), discardUpload: vi.fn(), cancelJob: vi.fn(), deleteJob: vi.fn(), getJobLog: vi.fn(), downloadUrl: vi.fn(),
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText(/Auto selected Mac M4 Pro/)).toBeVisible();
   });
 
   it("shows upload controls and server-configured output scale choices", async () => {

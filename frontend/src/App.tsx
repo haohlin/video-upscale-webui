@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
-import { ApiError, cancelJob, createJob, deleteJob, discardUpload, downloadUrl, getConfig, getHealth, getJobLog, getJobs, getUploads } from "./api";
-import { outputScales, presetIds, type ColorCorrection, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type UploadProgress, type UploadSession } from "./types";
+import { ApiError, cancelJob, createApiClient, createJob, deleteJob, discardUpload, downloadUrl, getBackends, getConfig, getHealth, getJobLog, getJobs, getUploads } from "./api";
+import { outputScales, presetIds, type BackendDescriptor, type ColorCorrection, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type UploadProgress, type UploadSession } from "./types";
 
 const pollMs = 2_000;
 const acceptedVideoTypes = "video/*,.mp4,.mov,.mkv,.avi,.webm";
@@ -24,6 +24,18 @@ const presets: Array<{
     description: "Highest detail. Runs required safety probe first; may fail on this Mac.",
     badge: "Experimental",
     experimental: true,
+  },
+  {
+    id: "7b-fp8-quality",
+    title: "SeedVR2 7B FP8 Quality",
+    description: "Highest restoration quality tuned for the RTX 4090.",
+    badge: "RTX 4090",
+  },
+  {
+    id: "3b-fp8-fast",
+    title: "SeedVR2 3B FP8 Fast",
+    description: "Faster CUDA restoration using the RTX 4090.",
+    badge: "Fast",
   },
 ];
 
@@ -162,6 +174,12 @@ export default function App() {
   const resumeInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preset, setPreset] = useState<PresetId>("3b-safe");
+  const [availablePresets, setAvailablePresets] = useState<PresetId[]>(["3b-safe", "7b-fp8-experimental"]);
+  const [backends, setBackends] = useState<BackendDescriptor[]>([
+    { id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 },
+  ]);
+  const [backendChoice, setBackendChoice] = useState("auto");
+  const [backendReady, setBackendReady] = useState<Record<string, boolean>>({ mac: true });
   const [colorCorrection, setColorCorrection] = useState<ColorCorrection>("lab");
   const [outputScale, setOutputScale] = useState<OutputScale>(1);
   const [scaleOptions, setScaleOptions] = useState(fallbackScaleOptions);
@@ -182,8 +200,56 @@ export default function App() {
   const [debugText, setDebugText] = useState("");
   const debugOffsetRef = useRef(0);
 
+  const clients = useMemo(
+    () => new Map(backends.map((backend) => [backend.id, createApiClient(backend)])),
+    [backends],
+  );
+  const multiBackend = backends.length > 1;
+  const selectedBackend = useMemo(() => {
+    if (backendChoice !== "auto") return backends.find((backend) => backend.id === backendChoice) ?? null;
+    return [...backends]
+      .sort((left, right) => left.preference - right.preference)
+      .find((backend) => backendReady[backend.id]) ?? null;
+  }, [backendChoice, backendReady, backends]);
+
+  useEffect(() => {
+    void getBackends().then((descriptors) => {
+      if (descriptors.length > 0) setBackends(descriptors);
+    }).catch(() => {
+      // Older backend remains usable as one current-origin Mac service.
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
+      if (multiBackend) {
+        const snapshots = await Promise.all(backends.map(async (backend) => {
+          const client = clients.get(backend.id);
+          if (!client) throw new Error("Backend client unavailable");
+          try {
+            const [health, backendJobs, backendUploads] = await Promise.all([
+              client.getHealth(), client.getJobs(), client.getUploads(),
+            ]);
+            if (health.status.toLowerCase() !== "ok") throw new Error("Backend unavailable");
+            return {
+              backend,
+              ready: true,
+              jobs: backendJobs.map((job) => ({ ...job, backend_id: backend.id, backend_display_name: backend.display_name })),
+              uploads: backendUploads.map((upload) => ({ ...upload, backend_id: backend.id, backend_display_name: backend.display_name })),
+            };
+          } catch {
+            return { backend, ready: false, jobs: [] as Job[], uploads: [] as UploadSession[] };
+          }
+        }));
+        const receivedAt = Date.now();
+        setBackendReady(Object.fromEntries(snapshots.map((snapshot) => [snapshot.backend.id, snapshot.ready])));
+        setJobs(sortJobs(snapshots.flatMap((snapshot) => snapshot.jobs)));
+        setPendingUploads(snapshots.flatMap((snapshot) => snapshot.uploads));
+        setLastPollReceivedAt(receivedAt);
+        setDisplayNow(receivedAt);
+        setConnectionError(snapshots.some((snapshot) => snapshot.ready) ? null : "Could not reach any Video Upscale backend");
+        return;
+      }
       const [health, nextJobs, nextUploads] = await Promise.all([getHealth(), getJobs(), getUploads()]);
       if (health.status.toLowerCase() !== "ok") throw new ApiError("Service is not ready");
       const receivedAt = Date.now();
@@ -195,7 +261,7 @@ export default function App() {
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : "Could not reach Video Upscale service");
     }
-  }, []);
+  }, [backends, clients, multiBackend]);
 
   useEffect(() => {
     void refresh();
@@ -205,8 +271,13 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
-    void getConfig().then((config) => {
+    const configRequest = multiBackend && selectedBackend
+      ? clients.get(selectedBackend.id)?.getConfig()
+      : getConfig();
+    if (!configRequest) return;
+    void configRequest.then((config) => {
       if (presetIds.includes(config.default_profile)) setPreset(config.default_profile);
+      setAvailablePresets(config.presets.filter((candidate): candidate is PresetId => presetIds.includes(candidate)));
       if (isOutputScale(config.default_output_scale)) setOutputScale(config.default_output_scale);
       if (Array.isArray(config.output_scales)) {
         const validOptions = config.output_scales.filter((option) => isOutputScale(option.value));
@@ -215,7 +286,7 @@ export default function App() {
     }).catch(() => {
       // Existing default remains usable while a host is being upgraded.
     });
-  }, []);
+  }, [clients, multiBackend, selectedBackend]);
 
   useEffect(() => {
     setSourceDimensions(null);
@@ -258,7 +329,10 @@ export default function App() {
     let cancelled = false;
     const readLog = async () => {
       try {
-        const log = await getJobLog(monitoredJobId, debugOffsetRef.current);
+        const owner = monitoredJob?.backend_id;
+        const log = multiBackend && owner
+          ? await clients.get(owner)!.getJobLog(monitoredJobId, debugOffsetRef.current)
+          : await getJobLog(monitoredJobId, debugOffsetRef.current);
         if (cancelled) return;
         debugOffsetRef.current = log.next_offset;
         if (log.text) {
@@ -275,7 +349,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [monitoredJobId, monitoredJobIsActive, showDebugConsole]);
+  }, [clients, monitoredJob, monitoredJobId, monitoredJobIsActive, multiBackend, showDebugConsole]);
 
   const chooseFile = (file?: File) => {
     if (!file) return;
@@ -301,6 +375,7 @@ export default function App() {
   const beginResume = (upload: UploadSession) => {
     setActionError(null);
     setResumeTarget(upload);
+    if (upload.backend_id) setBackendChoice(upload.backend_id);
     window.setTimeout(() => resumeInputRef.current?.click(), 0);
   };
 
@@ -308,7 +383,8 @@ export default function App() {
     if (!window.confirm(`End upload for ${upload.filename}? Confirmed partial data will be deleted.`)) return;
     setActionError(null);
     try {
-      await discardUpload(upload.id);
+      if (multiBackend && upload.backend_id) await clients.get(upload.backend_id)!.discardUpload(upload.id);
+      else await discardUpload(upload.id);
       setPendingUploads((current) => current.filter((item) => item.id !== upload.id));
       if (resumeSessionId === upload.id) {
         setSelectedFile(null);
@@ -335,7 +411,9 @@ export default function App() {
       retryAttempt: 0,
     });
     try {
-      const created = await createJob(selectedFile, preset, colorCorrection, outputScale, {
+      if (!selectedBackend) throw new ApiError("Selected processing backend is offline");
+      const submit = multiBackend ? clients.get(selectedBackend.id)!.createJob : createJob;
+      const createdRaw = await submit(selectedFile, preset, colorCorrection, outputScale, {
         resumeSessionId: resumeSessionId ?? undefined,
         onSession: setResumeSessionId,
         onProgress: (progress) => {
@@ -349,6 +427,9 @@ export default function App() {
           });
         },
       });
+      const created = multiBackend
+        ? { ...createdRaw, backend_id: selectedBackend.id, backend_display_name: selectedBackend.display_name }
+        : createdRaw;
       setJobs((current) => sortJobs([created, ...current.filter((job) => job.id !== created.id)]));
       setSelectedFile(null);
       setUploadState(null);
@@ -363,22 +444,30 @@ export default function App() {
     }
   };
 
-  const onCancel = async (id: string) => {
+  const onCancel = async (job: Job) => {
     setActionError(null);
     try {
-      const updated = await cancelJob(id);
-      setJobs((current) => sortJobs(current.map((job) => (job.id === id ? updated : job))));
+      const updatedRaw = multiBackend && job.backend_id
+        ? await clients.get(job.backend_id)!.cancelJob(job.id)
+        : await cancelJob(job.id);
+      const updated = { ...updatedRaw, backend_id: job.backend_id, backend_display_name: job.backend_display_name };
+      setJobs((current) => sortJobs(current.map((candidate) => (
+        candidate.id === job.id && candidate.backend_id === job.backend_id ? updated : candidate
+      ))));
       await refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not cancel job");
     }
   };
 
-  const onDelete = async (id: string) => {
+  const onDelete = async (job: Job) => {
     setActionError(null);
     try {
-      await deleteJob(id);
-      setJobs((current) => current.filter((job) => job.id !== id));
+      if (multiBackend && job.backend_id) await clients.get(job.backend_id)!.deleteJob(job.id);
+      else await deleteJob(job.id);
+      setJobs((current) => current.filter((candidate) => !(
+        candidate.id === job.id && candidate.backend_id === job.backend_id
+      )));
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not delete job");
     }
@@ -391,14 +480,14 @@ export default function App() {
           <span className="brand-mark">{icon("play")}</span>
           <div>
             <h1>Video Upscale</h1>
-            <p>Local AI upscaling for your videos. Private. All on your Mac.</p>
+            <p>Private AI video restoration on your Mac or RTX 4090.</p>
           </div>
         </div>
         <div className="topbar-status" aria-label="Connection information">
           <span className="safe-status">{icon("shield")} Private via Tailscale</span>
           <span className={`service-status ${connectionError ? "service-status--error" : ""}`}>
             <i aria-hidden="true" />
-            {connectionError ? "Service unavailable" : "Mac processing service"}
+            {connectionError ? "Service unavailable" : selectedBackend?.display_name ?? "No backend ready"}
           </span>
         </div>
       </header>
@@ -414,6 +503,16 @@ export default function App() {
       <section className="workspace" aria-label="Video upscaling workspace">
         <form className="panel settings-panel" onSubmit={onSubmit}>
           <PanelTitle number="1" title="Upload & Settings" />
+          <label className="select-label backend-select">
+            <span>Processing host</span>
+            <select aria-label="Processing host" value={backendChoice} disabled={isSubmitting} onChange={(event) => setBackendChoice(event.target.value)}>
+              <option value="auto">Auto — RTX 4090 preferred</option>
+              {backends.map((backend) => (
+                <option key={backend.id} value={backend.id}>{backend.display_name}{backendReady[backend.id] ? " — Ready" : " — Offline"}</option>
+              ))}
+            </select>
+            <small>{backendChoice === "auto" ? `Auto selected ${selectedBackend?.display_name ?? "no available backend"}` : selectedBackend?.display_name}</small>
+          </label>
           <input
             ref={fileInputRef}
             id="video-file"
@@ -465,7 +564,7 @@ export default function App() {
                     <div>
                       <strong>{upload.filename}</strong>
                       <span>{formatBytes(upload.accepted_bytes)} / {formatBytes(upload.total_bytes)} confirmed · {percent}%</span>
-                      <small>Available until {new Date(upload.expires_at).toLocaleString()}</small>
+                      <small>{upload.backend_display_name ?? "Mac M4 Pro"} · Available until {new Date(upload.expires_at).toLocaleString()}</small>
                     </div>
                     <div className="pending-upload__actions">
                       <button type="button" disabled={isSubmitting} aria-label={`Resume ${upload.filename}`} onClick={() => beginResume(upload)}>Resume</button>
@@ -511,7 +610,7 @@ export default function App() {
 
           <fieldset className="preset-fieldset">
             <legend>Upscale model</legend>
-            {presets.map((option) => (
+            {presets.filter((option) => availablePresets.includes(option.id)).map((option) => (
               <label key={option.id} className={`preset ${preset === option.id ? "preset--selected" : ""} ${option.experimental ? "preset--experimental" : ""}`}>
                 <input type="radio" name="preset" value={option.id} checked={preset === option.id} disabled={isSubmitting} onChange={() => setPreset(option.id)} />
                 <span className="radio-mark" aria-hidden="true" />
@@ -555,7 +654,7 @@ export default function App() {
           <PanelTitle number="2" title={`Job Queue & Progress${activeJobs.length ? ` (${activeJobs.length})` : ""}`} />
           {activeJobs.length > 0 ? (
             <div className="job-list">
-              {activeJobs.map((job) => <JobCard key={job.id} job={job} onCancel={onCancel} now={displayNow} lastPollReceivedAt={lastPollReceivedAt} />)}
+              {activeJobs.map((job) => <JobCard key={`${job.backend_id ?? "mac"}:${job.id}`} job={job} onCancel={onCancel} now={displayNow} lastPollReceivedAt={lastPollReceivedAt} />)}
             </div>
           ) : (
             <div className="empty-state">
@@ -583,7 +682,7 @@ export default function App() {
           <PanelTitle number="3" title="Result & Details" />
           {finishedJobs.length > 0 ? (
             <div className="result-list">
-              {finishedJobs.map((job) => <ResultCard key={job.id} job={job} onDelete={onDelete} />)}
+              {finishedJobs.map((job) => <ResultCard key={`${job.backend_id ?? "mac"}:${job.id}`} job={job} onDelete={onDelete} client={job.backend_id ? clients.get(job.backend_id) : undefined} />)}
             </div>
           ) : (
             <div className="empty-state empty-state--result">
@@ -596,7 +695,7 @@ export default function App() {
       </section>
 
       <footer>
-        <span>Private local processing. Videos never leave this Mac.</span>
+          <span>Private tailnet processing. Videos go only to your selected machine.</span>
         <span>MP4 output with source audio preserved when compatible.</span>
       </footer>
     </main>
@@ -656,7 +755,7 @@ function JobCard({
   lastPollReceivedAt,
 }: {
   job: Job;
-  onCancel: (id: string) => Promise<void>;
+  onCancel: (job: Job) => Promise<void>;
   now: number;
   lastPollReceivedAt: number;
 }) {
@@ -690,7 +789,7 @@ function JobCard({
           <strong>{job.original_filename}</strong>
           <span className="job-state"><i />{labelForStatus(job.status)}</span>
           <small>{detail}</small>
-          <small>{presetTitle(job.preset)} · {formatScale(job.output_scale)} · MP4</small>
+          <small>{job.backend_display_name ?? "Mac M4 Pro"} · {presetTitle(job.preset)} · {formatScale(job.output_scale)} · MP4</small>
         </div>
         <strong className="job-percent">{measuredProgress ? `${progress}%` : staleWarning ? "Attention" : "Live"}</strong>
       </div>
@@ -700,7 +799,7 @@ function JobCard({
         ) : (
           <div className="progress-bar progress-bar--indeterminate" aria-label="Processing status" role="progressbar" aria-valuetext={progressValueText}><span /></div>
         )}
-        <button type="button" className="cancel-button" onClick={() => void onCancel(job.id)}>Cancel</button>
+        <button type="button" className="cancel-button" onClick={() => void onCancel(job)}>Cancel</button>
       </div>
       <div className="job-timing">
         {elapsed !== null && <span>Elapsed {formatDuration(elapsed)}</span>}
@@ -721,7 +820,15 @@ function JobCard({
   );
 }
 
-function ResultCard({ job, onDelete }: { job: Job; onDelete: (id: string) => Promise<void> }) {
+function ResultCard({
+  job,
+  onDelete,
+  client,
+}: {
+  job: Job;
+  onDelete: (job: Job) => Promise<void>;
+  client?: ReturnType<typeof createApiClient>;
+}) {
   const completed = job.status === "completed";
   return (
     <article className={`result-card ${completed ? "result-card--success" : "result-card--failed"}`}>
@@ -729,12 +836,12 @@ function ResultCard({ job, onDelete }: { job: Job; onDelete: (id: string) => Pro
         <span className="result-icon">{completed ? icon("check") : icon("x")}</span>
         <div>
           <strong>{completed ? job.output_filename ?? job.original_filename : job.original_filename}</strong>
-          <p>{completed ? <>{presetTitle(job.preset)} · {formatScale(job.output_scale)} MP4 · <span>100%</span></> : labelForStatus(job.status)}</p>
+          <p>{completed ? <>{job.backend_display_name ?? "Mac M4 Pro"} · {presetTitle(job.preset)} · {formatScale(job.output_scale)} MP4 · <span>100%</span></> : labelForStatus(job.status)}</p>
         </div>
-        <button type="button" className="icon-button" aria-label={`Delete ${job.original_filename}`} onClick={() => void onDelete(job.id)}>{icon("trash")}</button>
+        <button type="button" className="icon-button" aria-label={`Delete ${job.original_filename}`} onClick={() => void onDelete(job)}>{icon("trash")}</button>
       </div>
       {completed ? (
-        <a className="download-button" href={downloadUrl(job.id)} download>{icon("download")}Download MP4</a>
+        <a className="download-button" href={client ? client.downloadUrl(job.id) : downloadUrl(job.id)} download>{icon("download")}Download MP4</a>
       ) : (
         <p className="job-error" role="alert">{job.error ?? "This job did not produce a video."}</p>
       )}

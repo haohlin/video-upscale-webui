@@ -93,6 +93,8 @@ h1, h2, p { margin: 0; }
 .scale-copy small { display: block; margin-top: 4px; color: #a4afbf; font-size: .68rem; line-height: 1.3; }
 .select-label { display: grid; gap: 7px; margin-bottom: 12px; }
 .select-label select { width: 100%; min-height: 41px; padding: 0 34px 0 10px; border: 1px solid #394656; border-radius: 7px; color: #e9eff9; background: #151c25; }
+.backend-select { padding: 10px; border: 1px solid #344a65; border-radius: 8px; background: #111c29; }
+.backend-select small { color: #75a6ff; font-size: .7rem; }
 .experimental-note { margin: 0 0 12px; padding: 10px; border: 1px solid #716022; border-radius: 7px; color: #eadcb2; background: #3e321275; font-size: .75rem; line-height: 1.4; }
 .primary-button, .download-button { display: inline-flex; min-height: 50px; align-items: center; justify-content: center; gap: 9px; border: 0; border-radius: 7px; color: #fff; background: linear-gradient(135deg, #2f74ff, #1c5bdd); box-shadow: 0 9px 21px #0c4bb177; font-weight: 700; text-decoration: none; transition: transform .16s ease, filter .16s ease; }
 .primary-button:hover:not(:disabled), .download-button:hover { filter: brightness(1.1); transform: translateY(-1px); }

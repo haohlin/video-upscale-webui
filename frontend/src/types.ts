@@ -1,6 +1,8 @@
 export const presetIds = [
   "3b-safe",
   "7b-fp8-experimental",
+  "7b-fp8-quality",
+  "3b-fp8-fast",
 ] as const;
 
 export type PresetId = (typeof presetIds)[number];
@@ -49,13 +51,33 @@ export interface Job {
   output_filename: string | null;
   error: string | null;
   requires_preflight: boolean;
+  backend_id?: string;
+  backend_display_name?: string;
 }
 
 export interface Health {
   status: string;
   runner?: "ready" | "unavailable";
   detail?: string;
+  backend_id?: string;
+  display_name?: string;
+  platform?: string;
+  accelerator?: string;
+  state?: "ready" | "busy" | "offline";
+  presets?: PresetId[];
 }
+
+export interface BackendDescriptor {
+  id: string;
+  display_name: string;
+  api_base_url: string;
+  preference: number;
+}
+
+export type Owned<T> = T & {
+  backend_id: string;
+  backend_display_name: string;
+};
 
 export interface RuntimeConfig {
   default_profile: PresetId;
@@ -77,6 +99,8 @@ export interface UploadSession {
   total_bytes: number;
   accepted_bytes: number;
   expires_at: string;
+  backend_id?: string;
+  backend_display_name?: string;
 }
 
 export interface JobLogTail {
