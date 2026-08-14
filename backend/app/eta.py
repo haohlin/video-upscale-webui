@@ -16,6 +16,9 @@ class ActiveWork:
     runtime_profile_fingerprint: str
     workload_bucket: int
     phase_elapsed_seconds: float
+    completed_unique_frames: int = 0
+    chunk_unique_frames: int = 0
+    total_unique_frames: int = 0
 
 
 @dataclass(frozen=True)
@@ -125,13 +128,32 @@ def estimate_eta(
         )
 
     active_index = PHASES.index(active.phase)
-    remaining_units = {
+    remaining_units: dict[str, float] = {
         phase: (
             active.total_units - active.current_unit
             if phase == active.phase
             else active.total_units
         )
         for phase in PHASES[active_index:]
+    }
+    if (
+        active.chunk_unique_frames > 0
+        and active.completed_unique_frames >= 0
+        and active.total_unique_frames
+        >= active.completed_unique_frames + active.chunk_unique_frames
+    ):
+        future_frames = (
+            active.total_unique_frames
+            - active.completed_unique_frames
+            - active.chunk_unique_frames
+        )
+        future_chunk_equivalents = future_frames / active.chunk_unique_frames
+        for phase in PHASES:
+            remaining_units[phase] = remaining_units.get(phase, 0) + (
+                active.total_units * future_chunk_equivalents
+            )
+    remaining_units = {
+        phase: units for phase, units in remaining_units.items() if units > 0
     }
     if any(not rates_by_phase[phase] for phase in remaining_units):
         return EtaEstimate(None, None, "none", "none")

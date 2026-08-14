@@ -36,7 +36,15 @@ def sample(
     )
 
 
-def active(phase="encoding", current=5, total=10, elapsed=50):
+def active(
+    phase="encoding",
+    current=5,
+    total=10,
+    elapsed=50,
+    completed_frames=0,
+    chunk_frames=0,
+    total_frames=0,
+):
     return ActiveWork(
         phase,
         current,
@@ -44,6 +52,9 @@ def active(phase="encoding", current=5, total=10, elapsed=50):
         FINGERPRINT,
         workload_bucket(PIXEL_FRAMES),
         elapsed,
+        completed_frames,
+        chunk_frames,
+        total_frames,
     )
 
 
@@ -71,6 +82,26 @@ def test_one_comparable_run_returns_wide_low_confidence_range():
     assert result.low_seconds < result.high_seconds
     assert result.low_seconds <= 588
     assert result.high_seconds >= 1_568
+
+
+def test_remaining_video_chunks_are_included_in_eta():
+    samples = [
+        sample("current-run", phase, seconds)
+        for phase, seconds in PHASE_SECONDS.items()
+    ]
+    one_chunk = estimate_eta(active(), samples, 86_400)
+    four_chunks = estimate_eta(
+        active(completed_frames=25, chunk_frames=25, total_frames=100),
+        samples,
+        86_400,
+    )
+
+    assert one_chunk.low_seconds is not None
+    assert one_chunk.high_seconds is not None
+    assert four_chunks.low_seconds is not None
+    assert four_chunks.high_seconds is not None
+    assert four_chunks.low_seconds > one_chunk.low_seconds * 3
+    assert four_chunks.high_seconds > one_chunk.high_seconds * 3
 
 
 def test_three_matching_runs_plus_stable_current_rate_is_medium_confidence():

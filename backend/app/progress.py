@@ -268,7 +268,23 @@ def aggregate_progress(event: ProgressEvent) -> ProgressReport:
             GENERATION_CAP * event.completed_unique_frames / event.total_unique_frames
         )
         stage = _EVENT_STAGES[event.event_type]
-    elif event.event_type in {"output_started", "completed"}:
+    elif event.event_type == "output_started":
+        if (
+            event.completed_unique_frames is not None
+            and event.chunk_unique_frames is not None
+            and event.total_unique_frames is not None
+            and event.total_unique_frames > 0
+        ):
+            ready_frames = (
+                event.completed_unique_frames + event.chunk_unique_frames
+            )
+            percent = round(
+                GENERATION_CAP * ready_frames / event.total_unique_frames
+            )
+        else:
+            percent = 0
+        stage = _EVENT_STAGES[event.event_type]
+    elif event.event_type == "completed":
         percent = GENERATION_CAP
         stage = _EVENT_STAGES[event.event_type]
     else:

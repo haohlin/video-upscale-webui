@@ -421,7 +421,9 @@ class JobService:
             or event.phase is None
             or event.current_unit is None
             or event.total_units is None
+            or event.completed_unique_frames is None
             or event.chunk_unique_frames is None
+            or event.total_unique_frames is None
             or event.elapsed_seconds is None
         ):
             return True
@@ -434,6 +436,9 @@ class JobService:
                 job.target_width * job.target_height * event.chunk_unique_frames
             ),
             phase_elapsed_seconds=event.elapsed_seconds,
+            completed_unique_frames=event.completed_unique_frames,
+            chunk_unique_frames=event.chunk_unique_frames,
+            total_unique_frames=event.total_unique_frames,
         )
         current_job = self.store.get(job.id)
         remaining_deadline = self.settings.max_process_seconds

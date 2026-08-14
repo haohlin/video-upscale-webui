@@ -101,6 +101,27 @@ def test_chunk_completion_uses_unique_frames_not_equal_chunk_weight():
     assert report.percent == 24
 
 
+def test_output_started_counts_only_frames_ready_to_write():
+    report = aggregate_progress(
+        parse_progress_line(
+            event_line(
+                event_type="output_started",
+                phase=None,
+                current_unit=None,
+                total_units=None,
+                chunk_index=1,
+                chunk_count=37,
+                completed_unique_frames=0,
+                chunk_unique_frames=25,
+                total_unique_frames=923,
+            )
+        )
+    )
+
+    assert report.percent == 2
+    assert report.stage == "seedvr2-output"
+
+
 def test_temporal_overlap_never_counts_twice():
     first = aggregate_progress(
         parse_progress_line(
