@@ -30,6 +30,18 @@ h1, h2, p { margin: 0; }
 .safe-status svg { width: 17px; }
 .service-status i, .pulse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #54dd8c; box-shadow: 0 0 0 3px #237d4950; }
 .service-status--error i { background: #ff6574; box-shadow: 0 0 0 3px #a8323b50; }
+.machine-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.machine-card { display: grid; gap: 9px; padding: 11px 13px; border: 1px solid #334354; border-radius: 9px; background: #121a23; }
+.machine-card--ready { border-color: #315d49; }
+.machine-card--offline { opacity: .7; }
+.machine-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.machine-card__head strong { font-size: .8rem; }
+.machine-card__head span { display: inline-flex; align-items: center; gap: 6px; color: #a7b4c4; font-size: .69rem; }
+.machine-card__head i { width: 7px; height: 7px; border-radius: 50%; background: #ff6574; }
+.machine-card--ready .machine-card__head i { background: #54dd8c; box-shadow: 0 0 0 3px #237d4938; }
+.machine-card__metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; color: #8797aa; font-size: .67rem; }
+.machine-card__metrics span { display: grid; gap: 2px; }
+.machine-card__metrics strong { color: #d7e2f0; font-size: .72rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .message { display: flex; align-items: center; gap: 9px; margin-bottom: 16px; padding: 12px 14px; border: 1px solid #8d3943; border-radius: 9px; color: #ffdfe2; background: #401b23c9; font-size: .9rem; }
 .message span { color: #efb4ba; }
@@ -184,6 +196,8 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 17px
   .brand h1 { font-size: 2rem; }
   .topbar-status { padding-top: 4px; }
   .safe-status { min-height: 31px; padding: 6px 9px; font-size: .72rem; }
+  .machine-status { grid-template-columns: 1fr; }
+  .machine-card__metrics { grid-template-columns: repeat(2, 1fr); }
   .workspace { display: flex; flex-direction: column; gap: 13px; }
   .panel { border-radius: 11px; }
   .settings-panel, .jobs-panel, .results-panel { padding: 15px; }

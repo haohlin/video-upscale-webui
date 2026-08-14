@@ -176,6 +176,71 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByText(/Auto selected Mac M4 Pro/)).toBeVisible();
+    expect(screen.queryByRole("option", { name: /Windows RTX 4090/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Windows RTX 4090 status" })).toHaveTextContent("Offline");
+  });
+
+  it("shows live CPU GPU and RAM metrics separately from processing selection", async () => {
+    getBackends.mockResolvedValue([
+      { id: "windows-4090", display_name: "Windows RTX 4090", api_base_url: "https://windows.ts.net", preference: 10 },
+      { id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 },
+    ]);
+    createApiClient.mockImplementation((descriptor) => ({
+      descriptor,
+      getHealth: vi.fn().mockResolvedValue({
+        status: "ok",
+        backend_id: descriptor.id,
+        metrics: {
+          sampled_at: "2026-08-14T01:02:03+00:00",
+          cpu_percent: descriptor.id === "windows-4090" ? 42 : 18,
+          ram_used_bytes: 16 * 1024 ** 3,
+          ram_total_bytes: 32 * 1024 ** 3,
+          gpu_percent: descriptor.id === "windows-4090" ? 91 : 27,
+          gpu_memory_used_bytes: 12 * 1024 ** 3,
+          gpu_memory_total_bytes: 24 * 1024 ** 3,
+        },
+      }),
+      getConfig: vi.fn().mockResolvedValue(runtimeConfig), getJobs: vi.fn().mockResolvedValue([]), getUploads: vi.fn().mockResolvedValue([]),
+      createJob: vi.fn(), discardUpload: vi.fn(), cancelJob: vi.fn(), deleteJob: vi.fn(), getJobLog: vi.fn(), downloadUrl: vi.fn(),
+    }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("group", { name: "Windows RTX 4090 status" });
+    expect(card).toHaveTextContent("CPU 42%");
+    expect(card).toHaveTextContent("GPU 91%");
+    expect(card).toHaveTextContent("RAM 16.0 / 32.0 GB");
+    expect(card).toHaveTextContent("VRAM 12.0 / 24.0 GB");
+  });
+
+  it("detects an idle Windows backend coming online without refresh", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const windowsHealth = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue({ status: "ok", backend_id: "windows-4090" });
+    getBackends.mockResolvedValue([
+      { id: "windows-4090", display_name: "Windows RTX 4090", api_base_url: "https://windows.ts.net", preference: 10 },
+      { id: "mac", display_name: "Mac M4 Pro", api_base_url: "", preference: 100 },
+    ]);
+    createApiClient.mockImplementation((descriptor) => ({
+      descriptor,
+      getHealth: descriptor.id === "windows-4090" ? windowsHealth : vi.fn().mockResolvedValue({ status: "ok" }),
+      getConfig: vi.fn().mockResolvedValue(descriptor.id === "windows-4090" ? { ...runtimeConfig, default_profile: "7b-fp8-quality", presets: ["7b-fp8-quality", "3b-fp8-fast"] } : runtimeConfig),
+      getJobs: vi.fn().mockResolvedValue([]), getUploads: vi.fn().mockResolvedValue([]),
+      createJob: vi.fn(), discardUpload: vi.fn(), cancelJob: vi.fn(), deleteJob: vi.fn(), getJobLog: vi.fn(), downloadUrl: vi.fn(),
+    }));
+
+    render(<App />);
+    expect(await screen.findByText(/Auto selected Mac M4 Pro/)).toBeVisible();
+    expect(await screen.findByRole("group", { name: "Windows RTX 4090 status" })).toHaveTextContent("Offline");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText(/Auto selected Windows RTX 4090/)).toBeVisible();
+    expect(windowsHealth).toHaveBeenCalledTimes(2);
   });
 
   it("shows upload controls and server-configured output scale choices", async () => {

@@ -442,6 +442,19 @@ def test_7b_runs_mandatory_limited_preflight_before_full_upscale(tmp_path):
     assert runner.calls == ["preflight", "run"]
 
 
+def test_cuda_7b_skips_mac_only_preflight(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "nvidia-cuda")
+    monkeypatch.setenv("VIDEO_UPSCALE_DEFAULT_PROFILE", "7b-fp8-quality")
+    runner = RecordingRunner()
+    client = make_client(tmp_path, runner=runner)
+
+    job_id = submit_video(client, preset="7b-fp8-quality").json()["id"]
+    job = wait_for_status(client, job_id, "completed")
+
+    assert job["requires_preflight"] is False
+    assert runner.calls == ["run"]
+
+
 def test_7b_job_exposes_preflight_state_and_can_be_cancelled_during_probe(tmp_path):
     """The UI must show the required safety probe, not generic processing."""
     runner = BlockingPreflightRunner()

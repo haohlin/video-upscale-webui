@@ -186,6 +186,10 @@ class JobService:
                 target_width=target_width,
                 target_height=target_height,
                 runtime_profile_fingerprint=runtime_profile_fingerprint,
+                requires_preflight=(
+                    self.settings.device_backend_class == "apple-mps"
+                    and preset in {"7b-fp8-experimental", "7b-fp8-quality"}
+                ),
             )
         except Exception:
             if move_staged_file:

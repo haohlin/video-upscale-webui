@@ -65,6 +65,17 @@ export interface Health {
   accelerator?: string;
   state?: "ready" | "busy" | "offline";
   presets?: PresetId[];
+  metrics?: SystemMetrics;
+}
+
+export interface SystemMetrics {
+  sampled_at?: string;
+  cpu_percent: number | null;
+  ram_used_bytes: number | null;
+  ram_total_bytes: number | null;
+  gpu_percent: number | null;
+  gpu_memory_used_bytes: number | null;
+  gpu_memory_total_bytes: number | null;
 }
 
 export interface BackendDescriptor {

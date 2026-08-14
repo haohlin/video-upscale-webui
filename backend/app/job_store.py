@@ -202,9 +202,11 @@ class JobStore:
         target_width: int | None = None,
         target_height: int | None = None,
         runtime_profile_fingerprint: str = "legacy:unknown",
+        requires_preflight: bool | None = None,
     ) -> Job:
         now = self._now()
-        requires_preflight = preset in {"7b-fp8-experimental", "7b-fp8-quality"}
+        if requires_preflight is None:
+            requires_preflight = preset in {"7b-fp8-experimental", "7b-fp8-quality"}
         target_width = target_width if target_width is not None else media.width * 2
         target_height = target_height if target_height is not None else media.height * 2
         with self._connect() as connection:

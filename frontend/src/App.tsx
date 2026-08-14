@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { ApiError, cancelJob, createApiClient, createJob, deleteJob, discardUpload, downloadUrl, getBackends, getConfig, getHealth, getJobLog, getJobs, getUploads } from "./api";
-import { outputScales, presetIds, type BackendDescriptor, type ColorCorrection, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type UploadProgress, type UploadSession } from "./types";
+import { outputScales, presetIds, type BackendDescriptor, type ColorCorrection, type Health, type Job, type JobStatus, type OutputScale, type PresetId, type RuntimeConfig, type SystemMetrics, type UploadProgress, type UploadSession } from "./types";
 
 const pollMs = 2_000;
 const acceptedVideoTypes = "video/*,.mp4,.mov,.mkv,.avi,.webm";
@@ -171,6 +171,33 @@ function expectedDimension(value: number, scale: OutputScale): number {
   return Math.max(2, Math.floor((value * scale) / 2 + 0.5) * 2);
 }
 
+function formatPercent(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)}%` : "—";
+}
+
+function formatMemory(used: number | null | undefined, total: number | null | undefined): string {
+  if (typeof used !== "number" || typeof total !== "number" || total <= 0) return "—";
+  return `${(used / 1024 ** 3).toFixed(1)} / ${(total / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function MachineStatus({ backend, ready, health }: { backend: BackendDescriptor; ready: boolean; health: Health | null }) {
+  const metrics: SystemMetrics | undefined = health?.metrics;
+  return (
+    <article className={`machine-card ${ready ? "machine-card--ready" : "machine-card--offline"}`} role="group" aria-label={`${backend.display_name} status`}>
+      <div className="machine-card__head">
+        <strong>{backend.display_name}</strong>
+        <span><i aria-hidden="true" />{ready ? "Online" : "Offline"}</span>
+      </div>
+      <div className="machine-card__metrics">
+        <span>CPU <strong>{ready ? formatPercent(metrics?.cpu_percent) : "—"}</strong></span>
+        <span>GPU <strong>{ready ? formatPercent(metrics?.gpu_percent) : "—"}</strong></span>
+        <span>RAM <strong>{ready ? formatMemory(metrics?.ram_used_bytes, metrics?.ram_total_bytes) : "—"}</strong></span>
+        <span>VRAM <strong>{ready ? formatMemory(metrics?.gpu_memory_used_bytes, metrics?.gpu_memory_total_bytes) : "—"}</strong></span>
+      </div>
+    </article>
+  );
+}
+
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resumeInputRef = useRef<HTMLInputElement>(null);
@@ -182,6 +209,7 @@ export default function App() {
   ]);
   const [backendChoice, setBackendChoice] = useState("auto");
   const [backendReady, setBackendReady] = useState<Record<string, boolean>>({ mac: true });
+  const [backendHealth, setBackendHealth] = useState<Record<string, Health | null>>({});
   const [colorCorrection, setColorCorrection] = useState<ColorCorrection>("lab");
   const [outputScale, setOutputScale] = useState<OutputScale>(1);
   const [scaleOptions, setScaleOptions] = useState(fallbackScaleOptions);
@@ -239,15 +267,17 @@ export default function App() {
             return {
               backend,
               ready: true,
+              health,
               jobs: backendJobs.map((job) => ({ ...job, backend_id: backend.id, backend_display_name: backend.display_name })),
               uploads: backendUploads.map((upload) => ({ ...upload, backend_id: backend.id, backend_display_name: backend.display_name })),
             };
           } catch {
-            return { backend, ready: false, jobs: [] as Job[], uploads: [] as UploadSession[] };
+            return { backend, ready: false, health: null, jobs: [] as Job[], uploads: [] as UploadSession[] };
           }
         }));
         const receivedAt = Date.now();
         setBackendReady(Object.fromEntries(snapshots.map((snapshot) => [snapshot.backend.id, snapshot.ready])));
+        setBackendHealth(Object.fromEntries(snapshots.map((snapshot) => [snapshot.backend.id, snapshot.health])));
         setJobs(sortJobs(snapshots.flatMap((snapshot) => snapshot.jobs)));
         setPendingUploads(snapshots.flatMap((snapshot) => snapshot.uploads));
         setLastPollReceivedAt(receivedAt);
@@ -259,6 +289,8 @@ export default function App() {
       if (health.status.toLowerCase() !== "ok") throw new ApiError("Service is not ready");
       const receivedAt = Date.now();
       setJobs(sortJobs(nextJobs));
+      setBackendReady({ [backends[0]?.id ?? "mac"]: true });
+      setBackendHealth({ [backends[0]?.id ?? "mac"]: health });
       setPendingUploads(nextUploads);
       setLastPollReceivedAt(receivedAt);
       setDisplayNow(receivedAt);
@@ -306,10 +338,11 @@ export default function App() {
 
   const hasActiveJob = jobs.some(isActive);
   useEffect(() => {
-    if (!hasActiveJob && !showDebugConsole) return;
-    const timer = window.setInterval(() => void refresh(), pollMs);
+    const interval = hasActiveJob || showDebugConsole || multiBackend ? pollMs : null;
+    if (interval === null) return;
+    const timer = window.setInterval(() => void refresh(), interval);
     return () => window.clearInterval(timer);
-  }, [hasActiveJob, refresh, showDebugConsole]);
+  }, [hasActiveJob, multiBackend, refresh, showDebugConsole]);
 
   const hasTimedActiveJob = jobs.some((job) => isActive(job) && Boolean(job.started_at));
   useEffect(() => {
@@ -514,6 +547,12 @@ export default function App() {
         </section>
       )}
 
+      <section className="machine-status" aria-label="Machine status">
+        {backends.map((backend) => (
+          <MachineStatus key={backend.id} backend={backend} ready={Boolean(backendReady[backend.id])} health={backendHealth[backend.id] ?? null} />
+        ))}
+      </section>
+
       <section className="workspace" aria-label="Video upscaling workspace">
         <form className="panel settings-panel" onSubmit={onSubmit}>
           <PanelTitle number="1" title="Upload & Settings" />
@@ -521,8 +560,8 @@ export default function App() {
             <span>Processing host</span>
             <select aria-label="Processing host" value={backendChoice} disabled={isSubmitting} onChange={(event) => setBackendChoice(event.target.value)}>
               <option value="auto">Auto — RTX 4090 preferred</option>
-              {backends.map((backend) => (
-                <option key={backend.id} value={backend.id}>{backend.display_name}{backendReady[backend.id] ? " — Ready" : " — Offline"}</option>
+              {backends.filter((backend) => backendReady[backend.id]).map((backend) => (
+                <option key={backend.id} value={backend.id}>{backend.display_name}</option>
               ))}
             </select>
             <small>{backendChoice === "auto" ? `Auto selected ${selectedBackend?.display_name ?? "no available backend"}` : selectedBackend?.display_name}</small>

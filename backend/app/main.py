@@ -15,6 +15,7 @@ from .media import MediaProbe, SubprocessMediaProbe
 from .runner import RunnerConfigurationError, SubprocessRunner, UnavailableRunner, VideoRunner
 from .upload_guard import UploadBodyGuard
 from .upload_sessions import UploadSessionError, UploadSessionService
+from .system_metrics import SystemMetrics
 
 
 def create_app(
@@ -26,6 +27,7 @@ def create_app(
     free_space_bytes: Callable[[Path], int] | None = None,
     frontend_dist: Path | None = None,
     max_pending_jobs: int | None = None,
+    metrics_provider: Callable[[], dict[str, float | int | str | None]] | None = None,
 ) -> FastAPI:
     settings = Settings.from_environment()
     if data_root:
@@ -47,6 +49,7 @@ def create_app(
             runner = UnavailableRunner(str(error))
     jobs = JobService(settings, store, probe, runner, free_space_bytes=free_space_bytes)
     uploads = UploadSessionService(settings)
+    metrics_provider = metrics_provider or SystemMetrics(settings.device_backend_class).snapshot
     service = FastAPI(title="Video Upscale WebUI API")
     service.state.job_service = jobs
     service.state.upload_session_service = uploads
@@ -131,6 +134,7 @@ def create_app(
             "platform": settings.platform_name,
             "accelerator": settings.accelerator_name,
             "presets": list(settings.presets),
+            "metrics": metrics_provider(),
         }
         if getattr(runner, "health_status", "ready") != "ready":
             return JSONResponse(

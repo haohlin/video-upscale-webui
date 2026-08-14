@@ -20,7 +20,18 @@ def operator_headers() -> dict[str, str]:
 
 def test_health_reports_ready_status_for_available_runner(tmp_path):
     """Reporting a ready runner as degraded must make this test fail."""
-    client = TestClient(create_app(data_root=tmp_path, runner=ReadyRunner()))
+    metrics = {
+        "sampled_at": "2026-08-14T01:02:03+00:00",
+        "cpu_percent": 12.5,
+        "ram_used_bytes": 10,
+        "ram_total_bytes": 20,
+        "gpu_percent": 33.0,
+        "gpu_memory_used_bytes": 30,
+        "gpu_memory_total_bytes": 40,
+    }
+    client = TestClient(
+        create_app(data_root=tmp_path, runner=ReadyRunner(), metrics_provider=lambda: metrics)
+    )
 
     response = client.get("/api/health")
 
@@ -34,13 +45,18 @@ def test_health_reports_ready_status_for_available_runner(tmp_path):
         "accelerator": "Apple MPS",
         "state": "ready",
         "presets": ["3b-safe", "7b-fp8-experimental"],
+        "metrics": metrics,
     }
 
 
 def test_health_reports_degraded_when_seedvr2_runner_is_unavailable(tmp_path):
     """Returning OK for a missing SeedVR2 adapter must make this test fail."""
     client = TestClient(
-        create_app(data_root=tmp_path, runner=UnavailableRunner("SeedVR2 adapter is missing"))
+        create_app(
+            data_root=tmp_path,
+            runner=UnavailableRunner("SeedVR2 adapter is missing"),
+            metrics_provider=lambda: {"cpu_percent": 9.0},
+        )
     )
 
     response = client.get("/api/health")
@@ -55,6 +71,7 @@ def test_health_reports_degraded_when_seedvr2_runner_is_unavailable(tmp_path):
         "accelerator": "Apple MPS",
         "state": "offline",
         "presets": ["3b-safe", "7b-fp8-experimental"],
+        "metrics": {"cpu_percent": 9.0},
     }
 
 
@@ -154,7 +171,18 @@ def test_cuda_backend_reports_4090_capabilities_and_presets(tmp_path, monkeypatc
     monkeypatch.setenv("VIDEO_UPSCALE_ACCELERATOR_NAME", "NVIDIA GeForce RTX 4090")
     monkeypatch.setenv("VIDEO_UPSCALE_DEVICE_BACKEND_CLASS", "nvidia-cuda")
     monkeypatch.setenv("VIDEO_UPSCALE_DEFAULT_PROFILE", "7b-fp8-quality")
-    client = TestClient(create_app(data_root=tmp_path, runner=ReadyRunner()))
+    metrics = {
+        "sampled_at": "2026-08-14T01:02:03+00:00",
+        "cpu_percent": 42.0,
+        "ram_used_bytes": 16 * 1024**3,
+        "ram_total_bytes": 32 * 1024**3,
+        "gpu_percent": 91.0,
+        "gpu_memory_used_bytes": 12 * 1024**3,
+        "gpu_memory_total_bytes": 24 * 1024**3,
+    }
+    client = TestClient(
+        create_app(data_root=tmp_path, runner=ReadyRunner(), metrics_provider=lambda: metrics)
+    )
 
     health = client.get("/api/health").json()
     config = client.get("/api/config", headers=operator_headers()).json()
@@ -168,6 +196,7 @@ def test_cuda_backend_reports_4090_capabilities_and_presets(tmp_path, monkeypatc
         "accelerator": "NVIDIA GeForce RTX 4090",
         "state": "ready",
         "presets": ["7b-fp8-quality", "3b-fp8-fast"],
+        "metrics": metrics,
     }
     assert config["default_profile"] == "7b-fp8-quality"
     assert config["presets"] == ["7b-fp8-quality", "3b-fp8-fast"]
