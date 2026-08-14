@@ -6,6 +6,7 @@ import os
 import plistlib
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from threading import Lock
@@ -94,8 +95,9 @@ class SystemMetrics:
     def _gpu(self, ram_total: int | None) -> tuple[float | None, int | None, int | None]:
         try:
             if self.device_backend_class == "nvidia-cuda":
+                nvidia_smi = shutil.which("nvidia-smi") or "/usr/lib/wsl/lib/nvidia-smi"
                 output = self._run([
-                    "nvidia-smi",
+                    nvidia_smi,
                     "--query-gpu=utilization.gpu,memory.used,memory.total",
                     "--format=csv,noheader,nounits",
                 ])
